@@ -1,3 +1,4 @@
+# Santeria venue calendar update — 2026-10-07
 """Private video finder and Sanremo concert watcher for one Discord guild.
 
 Secrets: DISCORD_TOKEN, OWNER_ID, GUILD_ID, TICKETMASTER_API_KEY in FadeHost.
@@ -7,11 +8,14 @@ Runtime data: /data/storage/videos.sqlite3 (persistent on FadeHost).
 import asyncio
 import datetime as dt
 import difflib
+import hashlib
 import os
 import re
 import sqlite3
 import unicodedata
+from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import aiohttp
@@ -27,6 +31,7 @@ TM_KEY = os.environ.get("TICKETMASTER_API_KEY", "")
 ROME = ZoneInfo("Europe/Rome")
 LONDON = ZoneInfo("Europe/London")
 TM_ROOT = "https://app.ticketmaster.com/discovery/v2"
+SANTERIA_CALENDAR = "https://www.santeria.milano.it/eventi/"
 
 DB_PATH = Path("/data/storage/videos.sqlite3")
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -281,11 +286,12 @@ ARTIST_LOOKUP = seed_artists()
 concert_lock = asyncio.Lock()
 
 
-def research(kind, target, result, matches_count=0, note=""):
+def research(kind, target, result, matches_count=0, note="",
+             source="Ticketmaster Discovery API"):
     db.execute("""INSERT INTO concert_research_log
         (checked_at, kind, target, source, result, matches, note)
-        VALUES (?, ?, ?, 'Ticketmaster Discovery API', ?, ?, ?)""",
-        (dt.datetime.now(dt.timezone.utc).isoformat(), kind, target,
+        VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (dt.datetime.now(dt.timezone.utc).isoformat(), kind, target, source,
          result, matches_count, note[:500]))
     db.commit()
 
@@ -365,6 +371,23 @@ def event_fields(event):
     )
 
 
+def other_source_has_event(date, city, venue, artists, source):
+    """Suppress two sources alerting the same artist/date/place as new shows."""
+    if not date or not city or not venue:
+        return False
+    rows = db.execute("""SELECT c.source, c.city, c.venue, a.artist
+        FROM concerts c JOIN concert_artists a ON a.event_id=c.event_id
+        WHERE c.concert_date=? AND c.source!=?
+          AND c.status IN ('CONFIRMED', 'RESCHEDULED')""", (date, source))
+    def same_venue(left, right):
+        a, b = normal(left or ""), normal(right or "")
+        santeria = {"santeria", "santeria social club", "santeria toscana 31"}
+        return a == b or {a, b} <= santeria
+    return any(artist in artists and normal(existing_city) == normal(city)
+               and same_venue(existing_venue, venue)
+               for _, existing_city, existing_venue, artist in rows)
+
+
 def save_event(event, artists):
     fields = event_fields(event)
     if not fields["event_id"] or not fields["url"] or not artists:
@@ -374,6 +397,10 @@ def save_event(event, artists):
         "SELECT concert_date, status FROM concerts WHERE event_id=?",
         (fields["event_id"],)).fetchone()
     if previous is None:
+        if fields["status"] in ("CONFIRMED", "RESCHEDULED") and \
+                other_source_has_event(fields["date"], fields["city"],
+                                       fields["venue"], artists, "Ticketmaster"):
+            return False
         db.execute("""INSERT INTO concerts(event_id, source, event_name,
             concert_date, city, region, venue, url, status, ticket_status,
             first_seen, last_seen) VALUES (?, 'Ticketmaster', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -504,7 +531,8 @@ async def discover_concerts(session):
 
     # Recheck known events by ID so changed statuses are not missed by an
     # upcoming-date search. A vanished page remains unresolved, not cancelled.
-    known = db.execute("SELECT event_id FROM concerts").fetchall()
+    known = db.execute("""SELECT event_id FROM concerts
+        WHERE source='Ticketmaster'""").fetchall()
     for (event_id,) in known:
         try:
             event = await tm_get(session, f"/events/{event_id}.json")
@@ -528,6 +556,204 @@ async def discover_concerts(session):
     return new_count, errors
 
 
+# Santeria's own public calendar covers events sold via TicketOne, DICE and
+# other sellers. Its markup is venue-specific; a changed page is an error,
+# never evidence that a missing concert was cancelled.
+MONTHS = {
+    "january": 1, "february": 2, "march": 3, "april": 4,
+    "may": 5, "june": 6, "july": 7, "august": 8,
+    "september": 9, "october": 10, "november": 11, "december": 12,
+    "gennaio": 1, "febbraio": 2, "marzo": 3, "aprile": 4,
+    "maggio": 5, "giugno": 6, "luglio": 7, "agosto": 8,
+    "settembre": 9, "ottobre": 10, "novembre": 11, "dicembre": 12,
+}
+CALENDAR_DATE = re.compile(
+    r"\b(" + "|".join(MONTHS) + r")\s+(\d{1,2})(?:st|nd|rd|th)?\s*,?\s*(20\d{2})\b",
+    re.IGNORECASE,
+)
+
+
+class SanteriaCards(HTMLParser):
+    """Read only date, title, venue tag and source link from event cards."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.depth = 0
+        self.card_depth = None
+        self.card = None
+        self.cards = []
+        self.title_h2 = False
+        self.title_link = False
+        self.date_link = False
+
+    def handle_starttag(self, tag, pairs):
+        attrs = dict(pairs)
+        classes = (attrs.get("class") or "").split()
+        if tag == "div":
+            self.depth += 1
+            if self.card is None and "fusion-column-wrapper" in classes:
+                self.card_depth = self.depth
+                self.card = {"title": [], "date_label": [], "locations": set(),
+                             "url": "", "sold_out": False}
+        if self.card is None:
+            return
+        if tag == "h2" and "titolo-evento" in classes:
+            self.title_h2 = True
+        if tag == "a":
+            href = attrs.get("href") or ""
+            if self.title_h2 and href and not self.card["url"]:
+                self.card["url"] = href
+                self.title_link = True
+            elif "fusion-button" in classes and "button-small" in classes:
+                self.date_link = True
+            if "location=" in href:
+                self.card["locations"].add(href.split("location=")[-1].split("&")[0])
+        if tag == "img" and normal(attrs.get("alt") or "") == "sold out":
+            self.card["sold_out"] = True
+
+    def handle_data(self, data):
+        if self.card is None:
+            return
+        if self.title_link:
+            self.card["title"].append(data)
+        if self.date_link:
+            self.card["date_label"].append(data)
+
+    def handle_endtag(self, tag):
+        if tag == "a":
+            self.title_link = False
+            self.date_link = False
+        elif tag == "h2":
+            self.title_h2 = False
+        elif tag == "div":
+            if self.card is not None and self.depth == self.card_depth:
+                self.cards.append(self.card)
+                self.card = None
+                self.card_depth = None
+            self.depth -= 1
+
+
+def parse_santeria(html, today):
+    parser = SanteriaCards()
+    parser.feed(html)
+    cards = [card for card in parser.cards if card["url"] and card["date_label"]]
+    if not cards:
+        raise ValueError("Santeria calendar event cards were not found")
+    events = []
+    for card in cards:
+        title = " ".join(" ".join(card["title"]).split())
+        artist_name = re.split(r"\s+[|–—-]\s+", title, maxsplit=1)[0].strip()
+        artist = ARTIST_LOOKUP.get(normal(artist_name))
+        if not artist or artist in AMBIGUOUS_NAMES:
+            continue
+        date_label = " ".join(card["date_label"])
+        date_match = CALENDAR_DATE.search(date_label)
+        if not date_match:
+            continue  # Missing year is not enough evidence for a new alert.
+        try:
+            date = dt.date(int(date_match[3]), MONTHS[date_match[1].lower()],
+                           int(date_match[2]))
+        except ValueError:
+            continue
+        if date < today or date.year > max(2027, today.year + 1):
+            continue
+        locations = card["locations"]
+        if "toscana-31" in locations:
+            venue = "Santeria Toscana 31"
+        elif "paladini-8" in locations:
+            venue = "Santeria Paladini 8"
+        else:
+            continue  # External events need their own verified city/venue.
+        url = card["url"]
+        parsed_url = urlparse(url)
+        if (parsed_url.scheme != "https" or
+                parsed_url.hostname != "www.santeria.milano.it"):
+            continue
+        label = normal(title + " " + date_label)
+        status = ("CANCELLED" if "annullato" in label or "cancelled" in label
+                  else "POSTPONED" if "rinviato" in label or "postponed" in label
+                  else "CONFIRMED")
+        sold_out = card["sold_out"]
+        events.append(dict(event_id="santeria:" + hashlib.sha256(
+                          url.encode("utf-8")).hexdigest()[:24],
+                           event_name=title, date=date.isoformat(),
+                           city="Milano", region="Lombardia", venue=venue,
+                           url=url, status=status,
+                           ticket_status="sold out" if sold_out else "not checked",
+                           artist=artist))
+    return events
+
+
+def save_santeria_event(fields):
+    event_id = fields["event_id"]
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    previous = db.execute("SELECT concert_date, status FROM concerts WHERE event_id=?",
+                          (event_id,)).fetchone()
+    if previous is None:
+        if fields["status"] == "CONFIRMED" and \
+                other_source_has_event(fields["date"], fields["city"],
+                                       fields["venue"], {fields["artist"]}, "Santeria"):
+            return False
+        db.execute("""INSERT INTO concerts(event_id, source, event_name,
+            concert_date, city, region, venue, url, status, ticket_status,
+            first_seen, last_seen) VALUES (?, 'Santeria', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (event_id, fields["event_name"], fields["date"], fields["city"],
+             fields["region"], fields["venue"], fields["url"], fields["status"],
+             fields["ticket_status"], now, now))
+        db.execute("INSERT INTO concert_artists(event_id, artist) VALUES (?, ?)",
+                   (event_id, fields["artist"]))
+        if fields["status"] == "CONFIRMED":
+            db.execute("""INSERT INTO concert_notifications
+                (event_id, kind, detail, created_at) VALUES (?, 'NEW', '', ?)""",
+                (event_id, now))
+    else:
+        db.execute("""UPDATE concerts SET event_name=?, concert_date=?, city=?,
+            region=?, venue=?, url=?, status=?, ticket_status=?, last_seen=?
+            WHERE event_id=?""",
+            (fields["event_name"], fields["date"], fields["city"],
+             fields["region"], fields["venue"], fields["url"], fields["status"],
+             fields["ticket_status"], now, event_id))
+        if previous != (fields["date"], fields["status"]):
+            detail = f"Previous: {previous[0] or 'date unknown'} ({previous[1]})"
+            db.execute("""INSERT INTO concert_history
+                (event_id, changed_at, old_date, new_date, old_status,
+                 new_status, note) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (event_id, now, previous[0], fields["date"], previous[1],
+                 fields["status"], "Santeria calendar listing changed; reason not supplied."))
+            pending = db.execute("""SELECT id FROM concert_notifications
+                WHERE event_id=? AND kind='NEW' AND sent_at IS NULL""",
+                (event_id,)).fetchone()
+            if pending and fields["status"] != "CONFIRMED":
+                db.execute("DELETE FROM concert_notifications WHERE id=?", pending)
+            elif not pending:
+                db.execute("""DELETE FROM concert_notifications
+                    WHERE event_id=? AND kind='UPDATE' AND sent_at IS NULL""",
+                    (event_id,))
+                db.execute("""INSERT INTO concert_notifications
+                    (event_id, kind, detail, created_at)
+                    VALUES (?, 'UPDATE', ?, ?)""", (event_id, detail, now))
+    db.commit()
+    return previous is None
+
+
+async def discover_santeria(session):
+    async with session.get(SANTERIA_CALENDAR,
+                           headers={"User-Agent": "PersonalConcertWatcher/1.0"}) as response:
+        if response.status != 200:
+            raise RuntimeError(f"Santeria calendar HTTP {response.status}")
+        if response.content_length and response.content_length > 4_000_000:
+            raise RuntimeError("Santeria calendar response was unexpectedly large")
+        html = await response.text()
+        if len(html) > 4_000_000:
+            raise RuntimeError("Santeria calendar response was unexpectedly large")
+    events = parse_santeria(html, dt.datetime.now(ROME).date())
+    added = sum(save_santeria_event(event) for event in events)
+    research("venue", "Santeria, Milano", "FOUND" if events else "WATCH",
+             len(events), "No exact roster matches" if not events else "",
+             source="Santeria official calendar")
+    return added
+
+
 async def send_pending_alerts():
     guild = bot.get_guild(GUILD_ID)
     channel = discord.utils.get(guild.text_channels, name="concert-alerts") if guild else None
@@ -536,11 +762,11 @@ async def send_pending_alerts():
     sent = 0
     queued = db.execute("""SELECT n.id, n.event_id, n.kind, n.detail,
         c.event_name, c.concert_date, c.city, c.venue, c.url, c.status,
-        c.ticket_status FROM concert_notifications n
+        c.ticket_status, c.source FROM concert_notifications n
         JOIN concerts c ON c.event_id=n.event_id
         WHERE n.sent_at IS NULL ORDER BY n.id""").fetchall()
     for (notification_id, event_id, kind, detail, event_name, date,
-         city, venue, url, status, ticket_status) in queued:
+         city, venue, url, status, ticket_status, source) in queued:
         artists = ", ".join(row[0] for row in db.execute(
             "SELECT artist FROM concert_artists WHERE event_id=? ORDER BY artist",
             (event_id,)))
@@ -558,7 +784,7 @@ async def send_pending_alerts():
         embed.add_field(name="Status", value=status.title(), inline=True)
         if detail:
             embed.add_field(name="Change", value=detail[:1000], inline=False)
-        embed.set_footer(text=f"Source: Ticketmaster • Ticket status: {ticket_status}")
+        embed.set_footer(text=f"Source: {source} • Ticket status: {ticket_status}")
         try:
             await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
         except (discord.Forbidden, discord.HTTPException) as exc:
@@ -571,21 +797,36 @@ async def send_pending_alerts():
 
 
 async def run_concert_check():
-    if not TM_KEY:
-        return "Set TICKETMASTER_API_KEY in FadeHost Environment first."
     if concert_lock.locked():
         return "A concert check is already running."
     async with concert_lock:
-        try:
-            timeout = aiohttp.ClientTimeout(total=25)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                new_count, errors = await discover_concerts(session)
-        except TicketmasterUnavailable as exc:
-            return f"Concert check stopped: {exc} Saved data remains unchanged where no update was verified."
+        timeout = aiohttp.ClientTimeout(total=25)
+        tm_new = venue_new = errors = 0
+        notes = []
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            if TM_KEY:
+                try:
+                    tm_new, tm_errors = await discover_concerts(session)
+                    errors += tm_errors
+                except (TicketmasterUnavailable, aiohttp.ClientError,
+                        asyncio.TimeoutError) as exc:
+                    errors += 1
+                    notes.append(f"Ticketmaster: {type(exc).__name__}.")
+            else:
+                notes.append("Ticketmaster key missing; checked venue calendar only.")
+            try:
+                venue_new = await discover_santeria(session)
+            except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError,
+                    ValueError, UnicodeError) as exc:
+                errors += 1
+                research("venue", "Santeria, Milano", "ERROR",
+                         note=type(exc).__name__, source="Santeria official calendar")
+                notes.append(f"Santeria calendar: {type(exc).__name__}.")
         sent, alert_note = await send_pending_alerts()
-        return (f"Concert check finished. {new_count} new Ticketmaster events saved; "
-                f"{sent} alerts posted; {errors} source errors. "
-                f"Missing results remain WATCH/unresolved. {alert_note}")
+        return (f"Concert check finished. {tm_new} new Ticketmaster events; "
+                f"{venue_new} new Santeria events; {sent} alerts posted; "
+                f"{errors} source errors. Missing results remain unresolved. "
+                + " ".join(notes) + " " + alert_note)
 
 
 @tree.command(name="checkconcerts", description="Check Sanremo artists' Italian concerts now",
@@ -610,7 +851,7 @@ async def checkconcerts(interaction: discord.Interaction):
 @tasks.loop(time=dt.time(hour=9, minute=0, tzinfo=LONDON))
 async def weekly_concerts():
     today = dt.datetime.now(LONDON).date()
-    if today.weekday() != 4 or not TM_KEY:
+    if today.weekday() != 4:
         return
     last = db.execute("SELECT value FROM concert_meta WHERE key='last_friday'").fetchone()
     if last and last[0] == str(today):
