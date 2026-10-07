@@ -1,4 +1,4 @@
-# Santeria venue calendar update — 2026-10-07
+# Concert database commands update — 2026-10-07
 """Private video finder and Sanremo concert watcher for one Discord guild.
 
 Secrets: DISCORD_TOKEN, OWNER_ID, GUILD_ID, TICKETMASTER_API_KEY in FadeHost.
@@ -13,6 +13,7 @@ import os
 import re
 import sqlite3
 import unicodedata
+import uuid
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlparse
@@ -844,6 +845,296 @@ async def checkconcerts(interaction: discord.Interaction):
         await interaction.followup.send(
             "Concert check stopped unexpectedly. See FadeHost's live console.",
             ephemeral=True)
+
+
+# --- Private concert catalogue: search and owner-entered listings ---
+
+def parse_calendar_day(value):
+    try:
+        parsed = dt.date.fromisoformat(value)
+        return parsed if parsed.isoformat() == value else None
+    except (TypeError, ValueError):
+        return None
+
+
+def valid_listing_url(value):
+    value = value.strip()
+    parsed = urlparse(value)
+    return (value if parsed.scheme == "https" and parsed.hostname and
+            not parsed.username and not parsed.password and
+            len(value) <= 350 and not any(c in value for c in " \n\r\t<>()")
+            else None)
+
+
+def find_duplicate_concert(artist, date, city, venue, exclude=""):
+    rows = db.execute("""SELECT c.event_id, c.source, c.city, c.venue, c.url
+        FROM concerts c JOIN concert_artists a ON a.event_id=c.event_id
+        WHERE c.concert_date=? AND a.artist=? AND c.event_id!=?""",
+        (date, artist, exclude))
+    desired_city, desired_venue = normal(city), normal(venue)
+    santeria = {"santeria", "santeria social club", "santeria toscana 31"}
+    for event_id, source, old_city, old_venue, url in rows:
+        old_venue = normal(old_venue or "")
+        if normal(old_city or "") == desired_city and (
+                old_venue == desired_venue or {old_venue, desired_venue} <= santeria):
+            return event_id, source, url
+    return None
+
+
+def catalogue_rows(artist="", city="", venue="", from_date="", to_date="",
+                   status="", source="", include_past=False, today=None):
+    """Return catalogue rows in date order, including entries with no date."""
+    today = today or dt.datetime.now(ROME).date()
+    minimum = from_date or ("" if include_past else today.isoformat())
+    rows = db.execute("""SELECT c.event_id, c.event_name, c.concert_date,
+        c.city, c.venue, c.url, c.status, c.source,
+        (SELECT GROUP_CONCAT(a.artist, ', ') FROM concert_artists a
+         WHERE a.event_id=c.event_id) AS artists
+        FROM concerts c""").fetchall()
+    result = []
+    for row in rows:
+        event_id, name, date, row_city, row_venue, url, state, origin, artists = row
+        if not date and (from_date or to_date):
+            continue
+        if date and ((minimum and date < minimum) or (to_date and date > to_date)):
+            continue
+        if artist and normal(artist) not in normal(artists or ""):
+            continue
+        if city and normal(city) not in normal(row_city or ""):
+            continue
+        if venue and normal(venue) not in normal(row_venue or ""):
+            continue
+        if status and state != status:
+            continue
+        if source and not origin.casefold().startswith(source.casefold()):
+            continue
+        result.append(row)
+    return sorted(result, key=lambda row: (row[2] is None, row[2] or "9999-99-99",
+                                           normal(row[8] or row[1]), row[0]))
+
+
+async def artist_options(interaction: discord.Interaction, current: str):
+    if interaction.user.id != OWNER_ID:
+        return []
+    choices = [row[0] for row in db.execute(
+        "SELECT name FROM sanremo_artists ORDER BY name")
+        if normal(current) in normal(row[0])]
+    return [app_commands.Choice(name=name[:100], value=name)
+            for name in choices[:25]]
+
+
+async def manual_event_options(interaction: discord.Interaction, current: str):
+    if interaction.user.id != OWNER_ID:
+        return []
+    rows = db.execute("""SELECT c.event_id, c.event_name, c.concert_date, c.city
+        FROM concerts c WHERE c.source LIKE 'Manual:%'
+        ORDER BY c.concert_date DESC""")
+    found = []
+    for event_id, name, date, city in rows:
+        label = f"{name} · {date or '?'} · {city}"
+        if normal(current) in normal(label + " " + event_id):
+            found.append(app_commands.Choice(name=label[:100], value=event_id))
+        if len(found) == 25:
+            break
+    return found
+
+
+STATUS_CHOICES = [
+    app_commands.Choice(name="Confirmed", value="CONFIRMED"),
+    app_commands.Choice(name="Rescheduled", value="RESCHEDULED"),
+    app_commands.Choice(name="Postponed", value="POSTPONED"),
+    app_commands.Choice(name="Cancelled", value="CANCELLED"),
+    app_commands.Choice(name="Watch / unverified", value="WATCH"),
+]
+
+
+@tree.command(name="concerts", description="Browse your concert database with filters",
+              guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(artist="Artist name", city="City", venue="Venue name",
+                       from_date="From YYYY-MM-DD", to_date="Through YYYY-MM-DD",
+                       status="Event status", source="Where the listing came from",
+                       include_past="Also show older dates", page="Page number")
+@app_commands.choices(status=STATUS_CHOICES, source=[
+    app_commands.Choice(name="Ticketmaster", value="Ticketmaster"),
+    app_commands.Choice(name="Santeria", value="Santeria"),
+    app_commands.Choice(name="Added by me", value="Manual:"),
+])
+@app_commands.autocomplete(artist=artist_options)
+async def concerts(interaction: discord.Interaction, artist: str | None = None,
+                   city: str | None = None, venue: str | None = None,
+                   from_date: str | None = None, to_date: str | None = None,
+                   status: app_commands.Choice[str] = None,
+                   source: app_commands.Choice[str] = None,
+                   include_past: bool = False, page: int = 1):
+    if interaction.user.id != OWNER_ID:
+        await interaction.response.send_message("This command is private.", ephemeral=True)
+        return
+    if ((from_date and not parse_calendar_day(from_date)) or
+            (to_date and not parse_calendar_day(to_date)) or
+            (from_date and to_date and from_date > to_date)):
+        await interaction.response.send_message(
+            "Use dates in YYYY-MM-DD format, with the start before the end.",
+            ephemeral=True)
+        return
+    if page < 1:
+        await interaction.response.send_message("Page must be 1 or higher.", ephemeral=True)
+        return
+    rows = catalogue_rows(artist or "", city or "", venue or "",
+                          from_date or "", to_date or "",
+                          status.value if status else "",
+                          source.value if source else "", include_past)
+    count = len(rows)
+    shown = rows[(page - 1) * 5:page * 5]
+    if not shown:
+        await interaction.response.send_message(
+            f"No concerts on page {page} for those filters ({count} total matches).",
+            ephemeral=True)
+        return
+    embed = discord.Embed(title=f"🎵 Concerts · {count} matching · page {page}",
+                          colour=discord.Colour.blue())
+    for event_id, name, date, row_city, row_venue, url, state, origin, artists in shown:
+        label = discord.utils.escape_markdown((artists or name)[:80])
+        location = discord.utils.escape_markdown(
+            f"{row_venue or 'Venue unknown'}, {row_city or 'City unknown'}"[:110])
+        embed.add_field(name=label or "Concert",
+                        value=(f"{date or 'Date unknown'} · {location}\n"
+                               f"{state.title()} · {discord.utils.escape_markdown(origin[:80])}\n"
+                               f"[Open source]({url})"), inline=False)
+    embed.set_footer(text="Use page: 2 for the next five. Dates show soonest first.")
+    await interaction.response.send_message(embed=embed, ephemeral=True,
+                                            allowed_mentions=discord.AllowedMentions.none())
+
+
+@tree.command(name="addconcert", description="Save a concert from any official listing",
+              guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(artist="Sanremo artist", date="YYYY-MM-DD", city="City",
+                       venue="Venue", url="Official event or ticket page URL",
+                       title="Optional event title")
+@app_commands.autocomplete(artist=artist_options)
+async def addconcert(interaction: discord.Interaction, artist: str, date: str,
+                     city: str, venue: str, url: str, title: str | None = None):
+    if interaction.user.id != OWNER_ID:
+        await interaction.response.send_message("This command is private.", ephemeral=True)
+        return
+    canonical = ARTIST_LOOKUP.get(normal(artist.strip()))
+    day, link = parse_calendar_day(date), valid_listing_url(url)
+    if not canonical:
+        await interaction.response.send_message(
+            "Choose an artist from the Sanremo autocomplete list.", ephemeral=True)
+        return
+    if not day or not link or not city.strip() or not venue.strip():
+        await interaction.response.send_message(
+            "Enter YYYY-MM-DD, a full https:// source link, city, and venue.",
+            ephemeral=True)
+        return
+    city, venue = city.strip()[:100], venue.strip()[:150]
+    if duplicate := find_duplicate_concert(canonical, date, city, venue):
+        await interaction.response.send_message(
+            f"Already saved from {discord.utils.escape_markdown(duplicate[1])}: "
+            f"[open listing]({duplicate[2]}).", ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none())
+        return
+    name = (title or canonical).strip()[:180] or canonical
+    event_id = "manual:" + uuid.uuid4().hex
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    source_name = "Manual: " + urlparse(link).hostname.removeprefix("www.")
+    with db:
+        db.execute("""INSERT INTO concerts(event_id, source, event_name,
+            concert_date, city, region, venue, url, status, ticket_status,
+            first_seen, last_seen) VALUES (?, ?, ?, ?, ?, '', ?, ?, 'CONFIRMED',
+            'not checked', ?, ?)""",
+            (event_id, source_name, name, date, city, venue, link, now, now))
+        db.execute("INSERT INTO concert_artists(event_id, artist) VALUES (?, ?)",
+                   (event_id, canonical))
+    await interaction.response.send_message(
+        f"Saved **{discord.utils.escape_markdown(canonical)}** · {date} · "
+        f"{discord.utils.escape_markdown(city)}. Find it with `/concerts`. "
+        "This is your own entry; the bot does not verify its status.",
+        ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+
+@tree.command(name="editconcert", description="Edit an event you added yourself",
+              guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(event_id="Select your saved event", new_date="YYYY-MM-DD",
+                       new_city="New city", new_venue="New venue",
+                       new_url="New official link", new_status="New status")
+@app_commands.choices(new_status=STATUS_CHOICES)
+@app_commands.autocomplete(event_id=manual_event_options)
+async def editconcert(interaction: discord.Interaction, event_id: str,
+                      new_date: str | None = None, new_city: str | None = None,
+                      new_venue: str | None = None, new_url: str | None = None,
+                      new_status: app_commands.Choice[str] = None):
+    if interaction.user.id != OWNER_ID:
+        await interaction.response.send_message("This command is private.", ephemeral=True)
+        return
+    existing = db.execute("""SELECT concert_date, city, venue, url, status
+        FROM concerts WHERE event_id=? AND source LIKE 'Manual:%'""",
+        (event_id,)).fetchone()
+    if not existing:
+        await interaction.response.send_message(
+            "Select one of your own entries from the autocomplete list.", ephemeral=True)
+        return
+    if new_date is not None and not parse_calendar_day(new_date):
+        await interaction.response.send_message("Use YYYY-MM-DD for the new date.",
+                                                ephemeral=True)
+        return
+    link = valid_listing_url(new_url) if new_url is not None else existing[3]
+    if not link or (new_city is not None and not new_city.strip()) or \
+            (new_venue is not None and not new_venue.strip()):
+        await interaction.response.send_message("Enter a valid https:// link, city, and venue.",
+                                                ephemeral=True)
+        return
+    updated = (new_date or existing[0],
+               new_city.strip()[:100] if new_city is not None else existing[1],
+               new_venue.strip()[:150] if new_venue is not None else existing[2],
+               link, new_status.value if new_status else existing[4])
+    if updated == existing:
+        await interaction.response.send_message("Nothing to change.", ephemeral=True)
+        return
+    artist = db.execute("SELECT artist FROM concert_artists WHERE event_id=?",
+                        (event_id,)).fetchone()[0]
+    if (updated[:3] != existing[:3] and
+            find_duplicate_concert(artist, *updated[:3], exclude=event_id)):
+        await interaction.response.send_message(
+            "That artist/date/place is already in the database.", ephemeral=True)
+        return
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    with db:
+        db.execute("""UPDATE concerts SET concert_date=?, city=?, venue=?, url=?,
+            status=?, source=?, last_seen=? WHERE event_id=?""",
+            (*updated, "Manual: " + urlparse(link).hostname.removeprefix("www."),
+             now, event_id))
+        db.execute("""INSERT INTO concert_history(event_id, changed_at, old_date,
+            new_date, old_status, new_status, note)
+            VALUES (?, ?, ?, ?, ?, ?, 'Owner edited this manual listing.')""",
+            (event_id, now, existing[0], updated[0], existing[4], updated[4]))
+    await interaction.response.send_message("Your concert entry was updated.",
+                                            ephemeral=True)
+
+
+@tree.command(name="deleteconcert", description="Delete an event you added yourself",
+              guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(event_id="Select your saved event")
+@app_commands.autocomplete(event_id=manual_event_options)
+async def deleteconcert(interaction: discord.Interaction, event_id: str):
+    if interaction.user.id != OWNER_ID:
+        await interaction.response.send_message("This command is private.", ephemeral=True)
+        return
+    row = db.execute("""SELECT event_name FROM concerts
+        WHERE event_id=? AND source LIKE 'Manual:%'""", (event_id,)).fetchone()
+    if not row:
+        await interaction.response.send_message(
+            "Only entries you added yourself can be deleted here.", ephemeral=True)
+        return
+    with db:
+        db.execute("DELETE FROM concert_notifications WHERE event_id=?", (event_id,))
+        db.execute("DELETE FROM concert_history WHERE event_id=?", (event_id,))
+        db.execute("DELETE FROM concert_artists WHERE event_id=?", (event_id,))
+        db.execute("DELETE FROM concerts WHERE event_id=?", (event_id,))
+    await interaction.response.send_message(
+        f"Deleted **{discord.utils.escape_markdown(row[0][:150])}** from your "
+        "manual entries.", ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none())
 
 
 # This task wakes daily at 09:00 London time, but calls the research API only
