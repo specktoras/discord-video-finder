@@ -1,4 +1,4 @@
-# Reviewed official concert import update — 2026-10-07
+# Concert browsing buttons update — 2026-10-07
 """Private video finder and Sanremo concert watcher for one Discord guild.
 
 Secrets: DISCORD_TOKEN, OWNER_ID, GUILD_ID, TICKETMASTER_API_KEY in FadeHost.
@@ -1197,6 +1197,88 @@ STATUS_CHOICES = [
 ]
 
 
+CONCERT_PAGE_SIZE = 5
+
+
+def concert_page_embed(rows, page):
+    embed = discord.Embed(title=f"🎵 Concerts · {len(rows)} matching",
+                          colour=discord.Colour.blue())
+    start = (page - 1) * CONCERT_PAGE_SIZE
+    for event_id, name, date, row_city, row_venue, url, state, origin, artists in \
+            rows[start:start + CONCERT_PAGE_SIZE]:
+        label = discord.utils.escape_markdown((artists or name)[:80])
+        location = discord.utils.escape_markdown(
+            f"{row_venue or 'Venue unknown'}, {row_city or 'City unknown'}"[:110])
+        embed.add_field(name=label or "Concert",
+                        value=(f"{date or 'Date unknown'} · {location}\n"
+                               f"{state.title()} · {discord.utils.escape_markdown(origin[:80])}\n"
+                               f"[Open source]({url})"), inline=False)
+    pages = (len(rows) + CONCERT_PAGE_SIZE - 1) // CONCERT_PAGE_SIZE
+    embed.set_footer(text=f"Page {page}/{pages} · Dates soonest first")
+    return embed
+
+
+class ConcertPager(discord.ui.View):
+    """Browse one filtered result set by editing its private Discord message."""
+
+    def __init__(self, rows, page):
+        super().__init__(timeout=600)
+        self.rows = rows
+        self.page = page
+        self.last_page = (len(rows) + CONCERT_PAGE_SIZE - 1) // CONCERT_PAGE_SIZE
+        self.message = None
+        self.update_buttons()
+
+    def update_buttons(self):
+        self.first.disabled = self.previous.disabled = self.page == 1
+        self.next.disabled = self.last.disabled = self.page == self.last_page
+        self.counter.label = f"{self.page}/{self.last_page}"
+
+    async def interaction_check(self, interaction: discord.Interaction):
+        if interaction.user.id != OWNER_ID:
+            await interaction.response.send_message("This menu is private.",
+                                                    ephemeral=True)
+            return False
+        return True
+
+    async def show(self, interaction: discord.Interaction, page):
+        self.page = max(1, min(page, self.last_page))
+        self.update_buttons()
+        await interaction.response.edit_message(
+            embed=concert_page_embed(self.rows, self.page), view=self,
+            allowed_mentions=discord.AllowedMentions.none())
+
+    @discord.ui.button(label="First", style=discord.ButtonStyle.secondary, row=0)
+    async def first(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.show(interaction, 1)
+
+    @discord.ui.button(label="Prev", style=discord.ButtonStyle.primary, row=0)
+    async def previous(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.show(interaction, self.page - 1)
+
+    @discord.ui.button(label="1/1", style=discord.ButtonStyle.secondary,
+                       disabled=True, row=0)
+    async def counter(self, interaction: discord.Interaction, button: discord.ui.Button):
+        pass  # The page indicator is deliberately not clickable.
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.primary, row=0)
+    async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.show(interaction, self.page + 1)
+
+    @discord.ui.button(label="Last", style=discord.ButtonStyle.secondary, row=0)
+    async def last(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.show(interaction, self.last_page)
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass  # The private response may already have been dismissed.
+
+
 @tree.command(name="concerts", description="Browse your concert database with filters",
               guild=discord.Object(id=GUILD_ID))
 @app_commands.describe(artist="Artist name", city="City", venue="Venue name",
@@ -1234,25 +1316,20 @@ async def concerts(interaction: discord.Interaction, artist: str | None = None,
                           status.value if status else "",
                           source.value if source else "", include_past)
     count = len(rows)
-    shown = rows[(page - 1) * 5:page * 5]
-    if not shown:
+    if (page - 1) * CONCERT_PAGE_SIZE >= count:
         await interaction.response.send_message(
             f"No concerts on page {page} for those filters ({count} total matches).",
             ephemeral=True)
         return
-    embed = discord.Embed(title=f"🎵 Concerts · {count} matching · page {page}",
-                          colour=discord.Colour.blue())
-    for event_id, name, date, row_city, row_venue, url, state, origin, artists in shown:
-        label = discord.utils.escape_markdown((artists or name)[:80])
-        location = discord.utils.escape_markdown(
-            f"{row_venue or 'Venue unknown'}, {row_city or 'City unknown'}"[:110])
-        embed.add_field(name=label or "Concert",
-                        value=(f"{date or 'Date unknown'} · {location}\n"
-                               f"{state.title()} · {discord.utils.escape_markdown(origin[:80])}\n"
-                               f"[Open source]({url})"), inline=False)
-    embed.set_footer(text="Use page: 2 for the next five. Dates show soonest first.")
-    await interaction.response.send_message(embed=embed, ephemeral=True,
-                                            allowed_mentions=discord.AllowedMentions.none())
+    view = ConcertPager(rows, page) if count > CONCERT_PAGE_SIZE else None
+    await interaction.response.send_message(
+        embed=concert_page_embed(rows, page), view=view, ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none())
+    if view is not None:
+        try:
+            view.message = await interaction.original_response()
+        except (discord.HTTPException, discord.ClientException):
+            pass  # Paging still works; only automatic timeout disabling is lost.
 
 
 @tree.command(name="importconcerts",
