@@ -1,4 +1,4 @@
-# Concert browsing buttons update — 2026-10-07
+# Main Festival artist roster update — 2026-10-07
 """Private video finder and Sanremo concert watcher for one Discord guild.
 
 Secrets: DISCORD_TOKEN, OWNER_ID, GUILD_ID, TICKETMASTER_API_KEY in FadeHost.
@@ -54,16 +54,27 @@ db.execute("""CREATE TABLE IF NOT EXISTS videos (
     uploaded_at TEXT NOT NULL, PRIMARY KEY (message_id, attachment_id)
 )""")
 
-# The original artist pool is deliberately static and auditable. A pair or group
-# is included together when it tours under that name; members are also listed
-# separately where they have their own concerts.
+# The artist pool covers people who competed at the main Festival, including
+# Nuove Proposte, but not every contestant in the preliminary Giovani shows.
+# Some pairs or groups and their members are indexed separately for their
+# individual concerts.
 SANREMO_BY_YEAR = {
     2021: """Aiello|Annalisa|Arisa|Malika Ayane|Orietta Berti|Bugo|Colapesce Dimartino|Coma_Cose|Extraliscio|Fasma|Fulminacci|Gaia|Max Gazzè|Ghemon|Gio Evan|Irama|La Rappresentante di Lista|Lo Stato Sociale|Madame|Måneskin|Ermal Meta|Francesca Michielin|Fedez|Noemi|Random|Francesco Renga|Willie Peyote""",
     2022: """Iva Zanicchi|Achille Lauro|Aka 7even|Michele Bravi|Emma|Massimo Ranieri|Sangiovanni|Gianni Morandi|Ana Mena|Elisa|Rkomi|Ditonellapiaga|Rettore|Fabrizio Moro|Giusy Ferreri|Giovanni Truppi|Mahmood|Blanco|Highsnob|Hu|Le Vibrazioni|Dargen D'Amico|Tananai|Yuman|Matteo Romano""",
     2023: """Paola & Chiara|Mara Sattei|Rosa Chemical|Gianluca Grignani|Levante|Lazza|LDA|Ultimo|Elodie|Mr.Rain|Giorgia|Colla Zio|Marco Mengoni|I Cugini di Campagna|Olly|Anna Oxa|Articolo 31|Ariete|Sethu|Shari|gIANMARIA|Modà|Will|Leo Gassmann""",
     2024: """Alessandra Amoroso|Alfa|Angelina Mango|BigMama|Bnkr44|Clara|Diodato|Fiorella Mannoia|Fred De Palma|Gazzelle|Geolier|Ghali|Il Tre|Il Volo|La Sad|Loredana Bertè|Maninni|Negramaro|Nek|Ricchi e Poveri|Rose Villain|Santi Francesi|The Kolors""",
     2025: """Brunori Sas|Sarah Toscano|Simone Cristicchi|Joan Thiele|Bresh|Marcella Bella|Tony Effe|Lucio Corsi|Shablo|Guè|Joshua|Tormento|Serena Brancale|Rocco Hunt|Francesco Gabbani|Rkomi""",
-    2026: """Tommaso Paradiso|Chiello|Tredici Pietro|Sal Da Vinci|Samurai Jay|Luchè|Raf|Bambole di Pezza|Nayt|Elettra Lamborghini|J-Ax|Enrico Nigiotti|Maria Antonietta & Colombre|Maria Antonietta|Colombre|Marco Masini|Fedez & Masini|LDA & Aka 7even|Patty Pravo|Eddie Brock""",
+    2026: """Tommaso Paradiso|Chiello|Tredici Pietro|Sal Da Vinci|Samurai Jay|Luchè|Raf|Bambole di Pezza|Nayt|Elettra Lamborghini|J-Ax|Enrico Nigiotti|Maria Antonietta & Colombre|Maria Antonietta|Colombre|Marco Masini|Fedez & Masini|LDA & Aka 7even|Patty Pravo|Eddie Brock|Sayf""",
+}
+
+# Rai: 2021 had a separate Nuove Proposte competition; 2025 and 2026
+# restored it. In 2022–2024 the Giovani qualifiers joined the Big lineup
+# and are already included above. Members of the Nuove Proposte groups below
+# are also searchable on their own.
+SANREMO_NUOVE_PROPOSTE_BY_YEAR = {
+    2021: """Gaudiano|Folcast|Greta Zuccoli|Davide Shorty|WrongOnYou|Avincola|Dellai|Elena Faggi""",
+    2025: """Alex Wyse|Maria Tomba|Settembre|Vale LP e Lil Jolie|Vale LP|Lil Jolie""",
+    2026: """Angelica Bove|Nicolò Filippucci|Blind, El Ma & Soniko|Blind|El Ma|Soniko|Mazzariello""",
 }
 
 # These names are official-Rai artist names, with common event-listing variants.
@@ -77,15 +88,19 @@ ARTIST_ALIASES = {
     "aka7even": "Aka 7even",
     "mr rain": "Mr.Rain",
     "renga": "Francesco Renga",
+    "vale lp & lil jolie": "Vale LP e Lil Jolie",
+    "blind el ma e soniko": "Blind, El Ma & Soniko",
 }
 
 # A plain name match is too weak for these short or common stage names.
 # They remain in the roster/research log until an attraction ID is verified.
-AMBIGUOUS_NAMES = {"Random", "Will", "Hu", "Joshua", "Gaia", "Emma", "Raf", "Nek"}
+AMBIGUOUS_NAMES = {"Random", "Will", "Hu", "Joshua", "Gaia", "Emma",
+                   "Raf", "Nek", "Blind", "El Ma"}
 
 VENUES = (
     ("Santeria", "Milano"), ("Alcatraz", "Milano"),
-    ("Fabrique", "Milano"), ("Hiroshima Mon Amour", "Torino"),
+    ("Fabrique", "Milano"), ("Allo Sbagliato - Teatro Principe", "Milano"),
+    ("Hiroshima Mon Amour", "Torino"),
     ("Teatro Colosseo", "Torino"), ("Estragon", "Bologna"),
     ("Locomotiv", "Bologna"), ("Europauditorium", "Bologna"),
     ("Largo Venue", "Roma"), ("Atlantico", "Roma"),
@@ -441,9 +456,10 @@ async def reindex(interaction: discord.Interaction):
 
 def seed_artists():
     years_by_name = {}
-    for year, names in SANREMO_BY_YEAR.items():
-        for name in names.split("|"):
-            years_by_name.setdefault(name, set()).add(year)
+    for lineup in (SANREMO_BY_YEAR, SANREMO_NUOVE_PROPOSTE_BY_YEAR):
+        for year, names in lineup.items():
+            for name in names.split("|"):
+                years_by_name.setdefault(name, set()).add(year)
     for name, years in years_by_name.items():
         db.execute("""INSERT INTO sanremo_artists(name, years) VALUES (?, ?)
             ON CONFLICT(name) DO UPDATE SET years=excluded.years""",
