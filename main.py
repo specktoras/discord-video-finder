@@ -1,4 +1,4 @@
-# Concert database commands update — 2026-10-07
+# Reviewed official concert import update — 2026-10-07
 """Private video finder and Sanremo concert watcher for one Discord guild.
 
 Secrets: DISCORD_TOKEN, OWNER_ID, GUILD_ID, TICKETMASTER_API_KEY in FadeHost.
@@ -92,6 +92,177 @@ VENUES = (
     ("Casa della Musica", "Napoli"), ("Hall", "Padova"),
     ("Gran Teatro Geox", "Padova"),
     ("Teatro Concordia", "Venaria Reale"),
+)
+
+# Official listings reviewed on 2026-10-07. A one-time source snapshot:
+# future changes on these sites require a fresh review or an owner edit.
+# Format: (artist, source, official tour URL, status, (date, city, venue) rows).
+REVIEWED_TOURS = (
+    ("Francesco Renga", "Friends & Partners", "https://www.friendsandpartners.it/in-tour/live-teatri-2027", "RESCHEDULED", (
+        ("2027-04-17", "Spoleto", "TEATRO NUOVO MENOTTI"),
+        ("2027-04-19", "Bologna", "TEATRO EUROPAUDITORIUM"),
+        ("2027-04-24", "Legnano", "TEATRO GALLERIA"),
+        ("2027-04-30", "Brescia", "TEATRO DIS_PLAY"),
+        ("2027-05-03", "Torino", "TEATRO COLOSSEO"),
+        ("2027-05-06", "Firenze", "TEATRO VERDI"),
+        ("2027-05-11", "Roma", "TEATRO BRANCACCIO"),
+        ("2027-05-13", "Bari", "TEATRO TEAM"),
+        ("2027-05-17", "Napoli", "TEATRO AUGUSTEO"),
+        ("2027-05-21", "Padova", "GRAN TEATRO GEOX"),
+        ("2027-05-24", "Milano", "TEATRO ARCIMBOLDI"),
+    )),
+    ("Raf", "Friends & Partners", "https://www.friendsandpartners.it/index.php/in-tour/raf-infinito-palasport-2027", "RESCHEDULED", (
+        ("2027-10-02", "Milano", "UNIPOL FORUM"),
+        ("2027-10-09", "Roma", "PALAZZO DELLO SPORT"),
+        ("2027-10-14", "Napoli", "TEATRO PALAPARTENOPE"),
+    )),
+    ("Mr.Rain", "Friends & Partners", "https://www.friendsandpartners.it/in-tour/mr-rain-nei-teatri", "CONFIRMED", (
+        ("2026-10-11", "Roma", "TEATRO BRANCACCIO"),
+        ("2026-10-19", "Torino", "TEATRO COLOSSEO"),
+        ("2026-10-23", "Brescia", "TEATRO CLERICI"),
+        ("2026-10-26", "Firenze", "TEATRO VERDI"),
+        ("2026-10-29", "Padova", "GRAN TEATRO GEOX"),
+        ("2026-11-05", "Bologna", "EUROPAUDITORIUM"),
+    )),
+    ("Fiorella Mannoia", "Friends & Partners", "https://www.friendsandpartners.it/in-tour/fiorella-mannoia-fiorella-canta-fabrizio-e-ivano-anime-salve", "CONFIRMED", (
+        ("2026-10-08", "Padova", "GRAN TEATRO GEOX"),
+        ("2026-10-10", "Ancona", "TEATRO DELLE MUSE"),
+        ("2026-10-11", "Assisi", "TEATRO LYRICK"),
+        ("2026-10-19", "Cremona", "TEATRO PONCHIELLI"),
+        ("2026-10-21", "Bologna", "EUROPAUDITORIUM"),
+        ("2026-10-22", "Bologna", "TEATRO EUROPAUDITORIUM"),
+        ("2026-10-28", "Torino", "TEATRO COLOSSEO"),
+        ("2026-10-29", "Torino", "TEATRO COLOSSEO"),
+        ("2026-10-30", "Mantova", "TEATRO PALAUNICAL"),
+        ("2026-11-09", "Palermo", "TEATRO MASSIMO"),
+        ("2026-11-11", "Ragusa", "TEATRO DUEMILA"),
+        ("2026-11-17", "Firenze", "TEATRO VERDI"),
+        ("2026-11-18", "Firenze", "TEATRO VERDI"),
+        ("2026-11-21", "Bergamo", "CHORUSLIFE ARENA"),
+        ("2026-11-23", "Legnano", "TEATRO GALLERIA"),
+        ("2026-11-24", "Genova", "TEATRO CARLO FELICE"),
+        ("2026-11-26", "Ravenna", "PALA DE' ANDRE'"),
+        ("2026-11-28", "Salerno", "TEATRO VERDI"),
+        ("2026-11-30", "Napoli", "TEATRO AUGUSTEO"),
+        ("2026-12-02", "Bari", "TEATRO TEAM"),
+        ("2026-12-03", "Lecce", "PALA EVENTI"),
+    )),
+    ("Arisa", "Friends & Partners", "https://www.friendsandpartners.it/in-tour/live-tour", "CONFIRMED", (
+        ("2026-11-14", "Parma", "TEATRO REGIO"),
+        ("2026-11-17", "Genova", "POLITEAMA GENOVESE"),
+        ("2026-11-19", "Montecatini", "TEATRO VERDI"),
+        ("2026-11-25", "Torino", "TEATRO COLOSSEO"),
+        ("2026-11-28", "Milano", "TEATRO LIRICO"),
+        ("2026-11-30", "Firenze", "TEATRO VERDI"),
+        ("2026-12-02", "Bitritto", "PALATOUR"),
+        ("2026-12-04", "Napoli", "TEATRO AUGUSTEO"),
+        ("2026-12-07", "Roma", "TEATRO BRANCACCIO"),
+        ("2026-12-10", "Bologna", "TEATRO EUROPAUDITORIUM"),
+        ("2026-12-12", "Legnano", "TEATRO GALLERIA"),
+        ("2026-12-14", "Padova", "GRAN TEATRO GEOX"),
+        ("2026-12-16", "Brescia", "TEATRO CLERICI"),
+        ("2026-12-18", "Mantova", "TEATRO PALAUNICAL"),
+        ("2026-12-21", "Cremona", "TEATRO PONCHIELLI"),
+    )),
+    ("Brunori Sas", "Vivo Concerti", "https://www.vivoconcerti.com/roster/brunori-sas/tuttobrunori-canzoni-e-monologhi", "CONFIRMED", (
+        ("2026-10-08", "Milano", "Teatro Arcimboldi"),
+        ("2026-10-09", "Milano", "Teatro Arcimboldi"),
+        ("2026-10-10", "Milano", "Teatro Arcimboldi"),
+        ("2026-10-12", "Genova", "Teatro Carlo Felice"),
+        ("2026-10-14", "Torino", "Auditorium Lingotto"),
+        ("2026-10-15", "Torino", "Auditorium Lingotto"),
+        ("2026-10-17", "Firenze", "Teatro Verdi"),
+        ("2026-10-18", "Firenze", "Teatro Verdi"),
+        ("2026-10-19", "Bologna", "Teatro Europauditorium"),
+        ("2026-10-22", "Trieste", "Teatro Rossetti"),
+        ("2026-10-23", "Padova", "Gran Teatro Geox"),
+        ("2026-10-31", "Avellino", "Teatro Gesualdo"),
+        ("2026-11-03", "Napoli", "Teatro Augusteo"),
+        ("2026-11-05", "Roma", "Teatro Conciliazione"),
+        ("2026-11-06", "Roma", "Teatro Conciliazione"),
+        ("2026-11-07", "Roma", "Teatro Conciliazione"),
+        ("2026-11-10", "Assisi", "Teatro Lyrick"),
+        ("2026-11-11", "Ancona", "Teatro delle Muse"),
+        ("2026-11-14", "Catania", "Teatro Metropolitan"),
+        ("2026-11-15", "Palermo", "Teatro Politeama"),
+        ("2026-11-17", "Bari", "Teatro Petruzzelli"),
+        ("2026-11-18", "Bari", "Teatro Petruzzelli"),
+        ("2026-11-21", "Catanzaro", "Teatro Politeama"),
+        ("2026-11-22", "Reggio Calabria", "Teatro Cilea"),
+        ("2026-11-24", "Cosenza", "Teatro Alfonso Rendano"),
+        ("2026-11-25", "Cosenza", "Teatro Alfonso Rendano"),
+    )),
+    ("Ultimo", "Vivo Concerti", "https://www.vivoconcerti.com/roster/ultimo/stadi-2027-la-favola-continua-1", "CONFIRMED", (
+        ("2027-06-10", "Lignano Sabbiadoro", "Stadio Teghil"),
+        ("2027-06-13", "Bologna", "Stadio Dall'Ara"),
+        ("2027-06-14", "Bologna", "Stadio Dall'Ara"),
+        ("2027-06-17", "Padova", "Stadio Euganeo"),
+        ("2027-06-20", "Milano", "Stadio San Siro"),
+        ("2027-06-21", "Milano", "Stadio San Siro"),
+        ("2027-06-24", "Napoli", "Stadio Diego Armando Maradona"),
+        ("2027-06-25", "Napoli", "Stadio Diego Armando Maradona"),
+        ("2027-06-28", "Messina", "Stadio Franco Scoglio"),
+        ("2027-06-29", "Messina", "Stadio Franco Scoglio"),
+        ("2027-07-03", "Reggio Calabria", "Stadio Granillo"),
+        ("2027-07-06", "Bari", "Stadio San Nicola"),
+        ("2027-07-07", "Bari", "Stadio San Nicola"),
+        ("2027-07-10", "Firenze", "Visarno Arena (Parco delle Cascine)"),
+        ("2027-07-16", "Torino", "Allianz Stadium"),
+        ("2027-07-17", "Torino", "Allianz Stadium"),
+        ("2027-07-24", "Olbia", "Olbia Arena"),
+    )),
+    ("Elodie", "Vivo Concerti", "https://www.vivoconcerti.com/roster/elodie/elodie-show-2027", "CONFIRMED", (
+        ("2027-04-24", "Ancona", "Palaprometeo"),
+        ("2027-04-29", "Roma", "Palazzo dello Sport"),
+        ("2027-04-30", "Roma", "Palazzo dello Sport"),
+        ("2027-05-04", "Napoli", "Teatro PalaPartenope"),
+        ("2027-05-05", "Napoli", "Teatro Palapartenope"),
+        ("2027-05-08", "Bari", "PalaFlorio"),
+        ("2027-05-09", "Bari", "PalaFlorio"),
+        ("2027-05-13", "Milano", "Unipol Forum"),
+        ("2027-05-14", "Milano", "Unipol Forum"),
+        ("2027-05-18", "Firenze", "Mandela Forum"),
+        ("2027-05-22", "Bologna", "Unipol Arena"),
+    )),
+    ("Francesca Michielin", "TicketOne", "https://www.ticketone.it/artist/francesca-michielin/", "CONFIRMED", (
+        ("2026-11-08", "Trento", "Teatro Auditorium Santa Chiara"),
+        ("2026-11-11", "Venezia", "Teatro Malibran"),
+        ("2026-11-13", "Torino", "Teatro Colosseo"),
+        ("2026-11-15", "Ancona", "Teatro delle Muse"),
+        ("2026-11-16", "Firenze", "Teatro Verdi"),
+        ("2026-11-20", "Bari", "Teatro Petruzzelli"),
+        ("2026-11-22", "Bologna", "Teatro Europauditorium"),
+        ("2026-11-23", "Trieste", "Politeama Rossetti - Sala Assicurazioni Generali"),
+        ("2026-11-25", "Padova", "Gran Teatro Geox"),
+        ("2026-11-28", "Roma", "Auditorium Conciliazione"),
+        ("2026-12-01", "Milano", "Teatro Arcimboldi"),
+        ("2026-12-03", "Napoli", "Teatro Augusteo"),
+    )),
+    ("Sal Da Vinci", "TicketOne", "https://www.ticketone.it/en/artist/sal-da-vinci/", "CONFIRMED", (
+        ("2026-10-08", "Ancona", "Teatro delle Muse"),
+        ("2026-10-09", "Roma", "Auditorium Conciliazione"),
+        ("2026-10-12", "Brescia", "Teatro Clerici"),
+        ("2026-10-13", "Torino", "Teatro Colosseo"),
+        ("2026-10-14", "Torino", "Teatro Colosseo"),
+        ("2026-10-16", "Padova", "Gran Teatro Geox"),
+        ("2026-10-18", "Bologna", "Teatro Europauditorium"),
+        ("2026-10-20", "Milano", "Teatro Arcimboldi"),
+        ("2026-10-23", "Bitritto", "Palatour"),
+        ("2026-10-27", "Catania", "Teatro Metropolitan"),
+        ("2026-10-29", "Avellino", "Teatro Carlo Gesualdo"),
+        ("2026-10-30", "Avellino", "Teatro Carlo Gesualdo"),
+        ("2026-11-03", "Firenze", "Teatro Verdi"),
+    )),
+    ("Mara Sattei", "TicketOne", "https://www.ticketone.it/artist/mara-sattei/", "CONFIRMED", (
+        ("2026-11-13", "Roma", "Alcazar Live"),
+        ("2026-11-18", "Torino", "Hiroshima Mon Amour"),
+        ("2026-11-20", "Pordenone", "Capitol"),
+        ("2026-11-23", "Milano", "Santeria Toscana 31"),
+        ("2026-11-27", "Conversano", "Casa delle Arti"),
+    )),
+    ("Annalisa", "TicketOne", "https://www.ticketone.it/en/artist/annalisa/?pnum=2", "CONFIRMED", (
+        ("2027-06-12", "Milano", "Stadio San Siro"),
+    )),
 )
 
 db.executescript("""
@@ -372,6 +543,45 @@ def event_fields(event):
     )
 
 
+def same_concert_place(city_a, venue_a, city_b, venue_b):
+    """Treat documented spellings of the same city/venue as one location."""
+    def city_key(value):
+        name = normal(re.sub(r"\s*\([A-Za-z]{2,}\)$", "", value or ""))
+        return {"milan": "milano", "turin": "torino", "rome": "roma",
+                "naples": "napoli", "florence": "firenze", "padua": "padova",
+                "bitritto bari": "bitritto"}.get(name, name)
+
+    def venue_key(value):
+        name = normal(value or "")
+        aliases = {
+            "santeria": "santeria toscana 31",
+            "santeria social club": "santeria toscana 31",
+            "teatro europauditorium": "europauditorium",
+            "teatro degli arcimboldi": "arcimboldi",
+            "teatro arcimboldi": "arcimboldi",
+            "teatro arcimboldi teatro degli arcimboldi": "arcimboldi",
+            "tam teatro arcimboldi milano": "arcimboldi",
+            "teatro pala partenope": "palapartenope",
+            "teatro palapartenope": "palapartenope",
+            "palaunical teatro": "palaunical",
+            "teatro palaunical": "palaunical",
+            "stadio dell ara": "stadio dall ara",
+            "stadio diego armando maradona": "stadio maradona",
+            "stadio armando maradona": "stadio maradona",
+            "teatro carlo gesualdo": "teatro gesualdo",
+            "auditorium conciliazione": "conciliazione",
+            "teatro conciliazione": "conciliazione",
+        }
+        return aliases.get(name, name)
+
+    venue = venue_key(venue_a)
+    if not venue or venue != venue_key(venue_b):
+        return False
+    first, second = city_key(city_a), city_key(city_b)
+    return bool(first and second) and (first == second or
+        (venue == "unipol forum" and {first, second} == {"milano", "assago"}))
+
+
 def other_source_has_event(date, city, venue, artists, source):
     """Suppress two sources alerting the same artist/date/place as new shows."""
     if not date or not city or not venue:
@@ -380,12 +590,8 @@ def other_source_has_event(date, city, venue, artists, source):
         FROM concerts c JOIN concert_artists a ON a.event_id=c.event_id
         WHERE c.concert_date=? AND c.source!=?
           AND c.status IN ('CONFIRMED', 'RESCHEDULED')""", (date, source))
-    def same_venue(left, right):
-        a, b = normal(left or ""), normal(right or "")
-        santeria = {"santeria", "santeria social club", "santeria toscana 31"}
-        return a == b or {a, b} <= santeria
-    return any(artist in artists and normal(existing_city) == normal(city)
-               and same_venue(existing_venue, venue)
+    return any(artist in artists and
+               same_concert_place(existing_city, existing_venue, city, venue)
                for _, existing_city, existing_venue, artist in rows)
 
 
@@ -871,14 +1077,56 @@ def find_duplicate_concert(artist, date, city, venue, exclude=""):
         FROM concerts c JOIN concert_artists a ON a.event_id=c.event_id
         WHERE c.concert_date=? AND a.artist=? AND c.event_id!=?""",
         (date, artist, exclude))
-    desired_city, desired_venue = normal(city), normal(venue)
-    santeria = {"santeria", "santeria social club", "santeria toscana 31"}
     for event_id, source, old_city, old_venue, url in rows:
-        old_venue = normal(old_venue or "")
-        if normal(old_city or "") == desired_city and (
-                old_venue == desired_venue or {old_venue, desired_venue} <= santeria):
+        if same_concert_place(city, venue, old_city, old_venue):
             return event_id, source, url
     return None
+
+
+def import_reviewed_concerts(preview=False, today=None):
+    """Add the reviewed 2026-10-07 snapshot once, without generating alerts."""
+    batch_key = "reviewed_official_import_2026_10_07"
+    if db.execute("SELECT 1 FROM concert_meta WHERE key=?", (batch_key,)).fetchone():
+        return {"already": True}
+    today = today or dt.datetime.now(ROME).date()
+    total = past = duplicates = 0
+    missing = []
+    for artist, source, url, status, events in REVIEWED_TOURS:
+        if not db.execute("SELECT 1 FROM sanremo_artists WHERE name=?",
+                          (artist,)).fetchone():
+            raise ValueError(f"Reviewed artist missing from roster: {artist}")
+        if not valid_listing_url(url) or status not in {"CONFIRMED", "RESCHEDULED"}:
+            raise ValueError(f"Reviewed source invalid: {artist}")
+        for date, city, venue in events:
+            total += 1
+            day = parse_calendar_day(date)
+            if not day or not city.strip() or not venue.strip():
+                raise ValueError(f"Reviewed listing incomplete: {artist} {date}")
+            if day < today:
+                past += 1
+            elif find_duplicate_concert(artist, date, city, venue):
+                duplicates += 1
+            else:
+                missing.append((artist, source, url, status, date, city, venue))
+    if not preview:
+        now = dt.datetime.now(dt.timezone.utc).isoformat()
+        with db:
+            for artist, source, url, status, date, city, venue in missing:
+                identity = "\0".join((artist, date, city, venue))
+                event_id = "reviewed:" + hashlib.sha256(
+                    identity.encode("utf-8")).hexdigest()[:24]
+                db.execute("""INSERT INTO concerts(event_id, source, event_name,
+                    concert_date, city, region, venue, url, status,
+                    ticket_status, first_seen, last_seen)
+                    VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, 'not checked', ?, ?)""",
+                    (event_id, "Reviewed: " + source, artist, date, city,
+                     venue, url, status, now, now))
+                db.execute("""INSERT INTO concert_artists(event_id, artist)
+                    VALUES (?, ?)""", (event_id, artist))
+            db.execute("INSERT INTO concert_meta(key, value) VALUES (?, ?)",
+                       (batch_key, now))
+    return {"already": False, "total": total, "past": past,
+            "duplicates": duplicates, "new": len(missing), "preview": preview}
 
 
 def catalogue_rows(artist="", city="", venue="", from_date="", to_date="",
@@ -928,6 +1176,7 @@ async def manual_event_options(interaction: discord.Interaction, current: str):
         return []
     rows = db.execute("""SELECT c.event_id, c.event_name, c.concert_date, c.city
         FROM concerts c WHERE c.source LIKE 'Manual:%'
+           OR c.source LIKE 'Reviewed:%'
         ORDER BY c.concert_date DESC""")
     found = []
     for event_id, name, date, city in rows:
@@ -957,6 +1206,7 @@ STATUS_CHOICES = [
 @app_commands.choices(status=STATUS_CHOICES, source=[
     app_commands.Choice(name="Ticketmaster", value="Ticketmaster"),
     app_commands.Choice(name="Santeria", value="Santeria"),
+    app_commands.Choice(name="Reviewed official listings", value="Reviewed:"),
     app_commands.Choice(name="Added by me", value="Manual:"),
 ])
 @app_commands.autocomplete(artist=artist_options)
@@ -1003,6 +1253,40 @@ async def concerts(interaction: discord.Interaction, artist: str | None = None,
     embed.set_footer(text="Use page: 2 for the next five. Dates show soonest first.")
     await interaction.response.send_message(embed=embed, ephemeral=True,
                                             allowed_mentions=discord.AllowedMentions.none())
+
+
+@tree.command(name="importconcerts",
+              description="Add a reviewed batch from official promoter and ticket listings",
+              guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(preview="Show the number of new listings without saving")
+async def importconcerts(interaction: discord.Interaction, preview: bool = False):
+    if interaction.user.id != OWNER_ID:
+        await interaction.response.send_message("This command is private.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        async with concert_lock:
+            result = import_reviewed_concerts(preview=preview)
+    except Exception as exc:
+        print(f"Reviewed concert import failed: {type(exc).__name__}: {exc}")
+        await interaction.followup.send(
+            "The import stopped without saving this batch. See FadeHost's live console.",
+            ephemeral=True)
+        return
+    if result["already"]:
+        reply = "The 7 October reviewed batch was already imported. Browse it with `/concerts`."
+    else:
+        action = "would add" if preview else "added"
+        reply = (f"Reviewed official listings: {result['total']} dates from "
+                 f"Friends & Partners, Vivo Concerti and TicketOne. "
+                 f"{result['new']} {action}; {result['duplicates']} already in your "
+                 f"database; {result['past']} past dates skipped. "
+                 + ("Run `/importconcerts` to save them. " if preview else
+                    "Find them with `/concerts`, source: Reviewed official listings. ")
+                 + "This batch does not post alerts. Source links are saved; "
+                   "later schedule changes need a fresh check or `/editconcert`.")
+    await interaction.followup.send(reply, ephemeral=True,
+                                    allowed_mentions=discord.AllowedMentions.none())
 
 
 @tree.command(name="addconcert", description="Save a concert from any official listing",
@@ -1053,7 +1337,7 @@ async def addconcert(interaction: discord.Interaction, artist: str, date: str,
         ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
 
-@tree.command(name="editconcert", description="Edit an event you added yourself",
+@tree.command(name="editconcert", description="Edit your own or a reviewed concert",
               guild=discord.Object(id=GUILD_ID))
 @app_commands.describe(event_id="Select your saved event", new_date="YYYY-MM-DD",
                        new_city="New city", new_venue="New venue",
@@ -1068,11 +1352,12 @@ async def editconcert(interaction: discord.Interaction, event_id: str,
         await interaction.response.send_message("This command is private.", ephemeral=True)
         return
     existing = db.execute("""SELECT concert_date, city, venue, url, status
-        FROM concerts WHERE event_id=? AND source LIKE 'Manual:%'""",
+        FROM concerts WHERE event_id=?
+          AND (source LIKE 'Manual:%' OR source LIKE 'Reviewed:%')""",
         (event_id,)).fetchone()
     if not existing:
         await interaction.response.send_message(
-            "Select one of your own entries from the autocomplete list.", ephemeral=True)
+            "Select a manual or reviewed entry from autocomplete.", ephemeral=True)
         return
     if new_date is not None and not parse_calendar_day(new_date):
         await interaction.response.send_message("Use YYYY-MM-DD for the new date.",
@@ -1106,13 +1391,13 @@ async def editconcert(interaction: discord.Interaction, event_id: str,
              now, event_id))
         db.execute("""INSERT INTO concert_history(event_id, changed_at, old_date,
             new_date, old_status, new_status, note)
-            VALUES (?, ?, ?, ?, ?, ?, 'Owner edited this manual listing.')""",
+            VALUES (?, ?, ?, ?, ?, ?, 'Owner edited this listing.')""",
             (event_id, now, existing[0], updated[0], existing[4], updated[4]))
     await interaction.response.send_message("Your concert entry was updated.",
                                             ephemeral=True)
 
 
-@tree.command(name="deleteconcert", description="Delete an event you added yourself",
+@tree.command(name="deleteconcert", description="Delete your own or a reviewed concert",
               guild=discord.Object(id=GUILD_ID))
 @app_commands.describe(event_id="Select your saved event")
 @app_commands.autocomplete(event_id=manual_event_options)
@@ -1121,10 +1406,12 @@ async def deleteconcert(interaction: discord.Interaction, event_id: str):
         await interaction.response.send_message("This command is private.", ephemeral=True)
         return
     row = db.execute("""SELECT event_name FROM concerts
-        WHERE event_id=? AND source LIKE 'Manual:%'""", (event_id,)).fetchone()
+        WHERE event_id=?
+          AND (source LIKE 'Manual:%' OR source LIKE 'Reviewed:%')""",
+        (event_id,)).fetchone()
     if not row:
         await interaction.response.send_message(
-            "Only entries you added yourself can be deleted here.", ephemeral=True)
+            "Only manual or reviewed entries can be deleted here.", ephemeral=True)
         return
     with db:
         db.execute("DELETE FROM concert_notifications WHERE event_id=?", (event_id,))
@@ -1133,7 +1420,7 @@ async def deleteconcert(interaction: discord.Interaction, event_id: str):
         db.execute("DELETE FROM concerts WHERE event_id=?", (event_id,))
     await interaction.response.send_message(
         f"Deleted **{discord.utils.escape_markdown(row[0][:150])}** from your "
-        "manual entries.", ephemeral=True,
+        "database.", ephemeral=True,
         allowed_mentions=discord.AllowedMentions.none())
 
 
