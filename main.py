@@ -6,9 +6,11 @@ Runtime data: /data/storage/videos.sqlite3 (persistent on FadeHost).
 """
 
 import asyncio
+import csv
 import datetime as dt
 import difflib
 import hashlib
+import io
 import os
 import re
 import sqlite3
@@ -1346,6 +1348,39 @@ async def concerts(interaction: discord.Interaction, artist: str | None = None,
             view.message = await interaction.original_response()
         except (discord.HTTPException, discord.ClientException):
             pass  # Paging still works; only automatic timeout disabling is lost.
+
+
+@tree.command(name="exportconcerts", description="Download your concert listings as CSV",
+              guild=discord.Object(id=GUILD_ID))
+async def exportconcerts(interaction: discord.Interaction):
+    if interaction.user.id != OWNER_ID:
+        await interaction.response.send_message("This command is private.", ephemeral=True)
+        return
+    rows = db.execute("""SELECT c.event_id, GROUP_CONCAT(a.artist, ' | '),
+        c.event_name, c.concert_date, c.city, c.region, c.venue, c.source,
+        c.status, c.ticket_status, c.url
+        FROM concerts c LEFT JOIN concert_artists a ON a.event_id=c.event_id
+        GROUP BY c.event_id
+        ORDER BY c.concert_date IS NULL, c.concert_date, c.event_name""").fetchall()
+
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow(("event_id", "artists", "event_name", "concert_date",
+                     "city", "region", "venue", "source", "status",
+                     "ticket_status", "url"))
+    for row in rows:
+        # Spreadsheet apps must not interpret an event title or venue as a formula.
+        writer.writerow("'" + value if isinstance(value, str) and
+                        value.startswith(("=", "+", "-", "@")) else
+                        value if value is not None else "" for value in row)
+
+    csv_file = io.BytesIO(output.getvalue().encode("utf-8-sig"))
+    filename = f"concerts_{dt.datetime.now(LONDON):%Y-%m-%d}.csv"
+    await interaction.response.send_message(
+        f"Exported {len(rows)} concert records, including past dates. "
+        "Only you can see and download this file; it contains no videos or secrets.",
+        file=discord.File(csv_file, filename=filename), ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none())
 
 
 @tree.command(name="importconcerts",
