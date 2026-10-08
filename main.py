@@ -1,4 +1,4 @@
-# Main Festival artist roster update — 2026-10-07
+# Verified concert database update — 2026-10-08
 """Private video finder and Sanremo concert watcher for one Discord guild.
 
 Secrets: DISCORD_TOKEN, OWNER_ID, GUILD_ID, TICKETMASTER_API_KEY in FadeHost.
@@ -280,6 +280,161 @@ REVIEWED_TOURS = (
     ("Annalisa", "TicketOne", "https://www.ticketone.it/en/artist/annalisa/?pnum=2", "CONFIRMED", (
         ("2027-06-12", "Milano", "Stadio San Siro"),
     )),
+)
+
+# Checked 8 October 2026 against current ticket, promoter, or venue pages.
+# Each line is date|city|venue. This is a one-time, owner-invoked snapshot:
+# source pages can change, and their absence later is not a cancellation signal.
+# The three older Mazzariello document dates are intentionally excluded:
+# the promoter's old tour URL now returns 404 and the artist's updated tour
+# schedule differs. Venue and municipal pages for two dates may be stale.
+VERIFIED_TOURS_2026_10_08 = (
+    ("Anna Oxa", "TicketOne", "https://www.ticketone.it/artist/anna-oxa/", "Anna Oxa", """
+2026-11-29|Genova|Teatro della Corte Ivo Chiesa
+2026-12-15|Ferrara|Teatro Comunale
+2027-01-07|Milano|Teatro Carcano
+2027-01-14|Alessandria|Teatro Alessandrino
+2027-01-16|Mestre|Teatro Corso
+2027-01-28|Roma|Teatro Italia
+2027-01-30|Salerno|Teatro Augusteo
+2027-02-02|Napoli|Teatro Acacia"""),
+    ("Ariete", "TicketOne", "https://www.ticketone.it/en/artist/ariete/", "Ariete – Club Tour 2026", """
+2026-11-07|Roma|Atlantico
+2026-11-19|Milano|Alcatraz
+2026-11-21|Venaria Reale|Teatro della Concordia
+2026-11-25|Padova|Hall
+2026-12-01|Firenze|Viper Theatre c/o Otel Club
+2026-12-10|Napoli|Casa della Musica Federico I
+2026-12-11|Bitritto|Palatour"""),
+    ("Alfa", "TicketOne", "https://www.ticketone.it/en/artist/alfa/alfa-tour-2026-3965924/", "Alfa – Tour 2026", """
+2026-10-16|Genova|Palateknoship
+2026-10-17|Genova|Palateknoship
+2026-10-24|Assago|Unipol Forum"""),
+    ("Alfa", "TicketOne", "https://www.ticketone.it/artist/alfa/alfa-tempo-al-tempo-tour-4247491/", "Alfa – Tempo al Tempo Tour", """
+2027-11-27|Bari|PalaFlorio
+2027-12-02|Firenze|Nelson Mandela Forum
+2027-12-04|Napoli|PalaPartenope
+2027-12-06|Roma|Palazzo dello Sport
+2027-12-13|Torino|Inalpi Arena"""),
+    ("Ditonellapiaga", "TicketOne", "https://www.ticketone.it/artist/ditonellapiaga/", "Ditonellapiaga Live 2026", """
+2026-11-27|Roma|Atlantico
+2026-11-30|Milano|Fabrique"""),
+    ("Eddie Brock", "TicketOne", "https://www.ticketone.it/artist/eddie-brock/", "Eddie Brock – Nosotros Live Tour", """
+2026-10-21|Roma|Hacienda
+2026-10-25|Milano|Santeria Toscana 31"""),
+    ("Emma", "TicketOne", "https://www.ticketone.it/artist/emma/", "Emma – Palasport 2027", """
+2027-10-23|Assago|Unipol Forum
+2027-10-25|Padova|Kioene Arena
+2027-10-27|Roma|Palazzo dello Sport
+2027-10-29|Napoli|Teatro PalaPartenope"""),
+    ("Irama", "TicketOne", "https://www.ticketone.it/en/artist/irama/", "Irama – A chi ci sarà sempre", """
+2026-12-06|Mantova|PalaUnical
+2026-12-08|Firenze|Nelson Mandela Forum
+2026-12-12|Roma|Palazzo dello Sport
+2026-12-16|Milano|Unipol Dome
+2026-12-19|Bologna|Unipol Arena
+2026-12-21|Torino|Inalpi Arena"""),
+    ("J-Ax", "TicketOne", "https://www.ticketone.it/artist/j-ax/", "J-Ax – Vita Morte Miracoli Tour", """
+2026-10-10|Milano|Fabrique
+2026-10-11|Milano|Fabrique
+2026-10-23|Roma|Atlantico
+2026-10-24|Roma|Atlantico"""),
+    ("LDA & Aka 7even", "TicketOne", "https://www.ticketone.it/en/artist/lda/", "LDA and Aka7even", """
+2026-11-20|Napoli|Casa della Musica Federico I
+2026-11-23|Milano|Magazzini Generali
+2026-11-24|Roma|Atlantico"""),
+    ("Le Vibrazioni", "TicketOne", "https://www.ticketone.it/artist/le-vibrazioni/", "Le Vibrazioni", """
+2026-10-29|Milano|Fabrique
+2026-11-05|Roma|Largo Venue
+2026-11-06|Padova|Hall"""),
+    ("Loredana Bertè", "Saison Culturelle", "https://saisonculturellevda.it/spettacoli/musica/loredana-berte-ancora-ribelle/", "Loredana Bertè – Ancora ribelle", """
+2026-10-09|Saint-Vincent|CVADOME"""),
+    ("Lucio Corsi", "TicketOne", "https://www.ticketone.it/artist/lucio-corsi/", "Lucio Corsi – Palasport 2026", """
+2026-11-27|Firenze|Nelson Mandela Forum
+2026-12-05|Roma|Palazzo dello Sport
+2026-12-11|Assago|Unipol Forum"""),
+    ("Michele Bravi", "TicketOne", "https://www.ticketone.it/artist/michele-bravi/", "Michele Bravi", """
+2026-11-02|Bologna|Teatro Europauditorium
+2026-11-03|Padova|Gran Teatro Geox
+2026-11-07|Genova|Teatro della Corte Ivo Chiesa
+2026-11-09|Torino|Teatro Colosseo
+2026-11-10|Milano|Teatro Lirico Giorgio Gaber
+2026-11-15|Pescara|Teatro Massimo
+2026-11-20|Roma|Teatro Brancaccio
+2026-11-22|Firenze|Teatro Cartiere Carrara"""),
+    ("Madame", "TicketOne", "https://www.ticketone.it/artist/madame/", "Madame – Disincanto Tour", """
+2026-11-28|Nonantola|Vox Club
+2026-11-30|Firenze|Teatro Cartiere Carrara
+2026-12-01|Napoli|Teatro PalaPartenope
+2026-12-05|Roma|Atlantico
+2026-12-06|Roma|Atlantico
+2026-12-08|Padova|Gran Teatro Geox
+2026-12-11|Milano|Fabrique
+2026-12-12|Milano|Fabrique
+2026-12-14|Brescia|Teatro Dis_Play c/o Brixia Forum
+2026-12-16|Venaria Reale|Teatro della Concordia"""),
+    ("Max Gazzè", "OTR Live", "https://www.otrlive.it/tour-dates/lornamento-delle-cose-secondarie-in-teatro/", "Max Gazzè – L'ornamento delle cose secondarie", """
+2026-10-10|Spoleto|Teatro Nuovo Gian Carlo Menotti
+2026-10-14|Mestre|Teatro Toniolo
+2026-10-15|Mestre|Teatro Toniolo
+2026-10-16|Mestre|Teatro Toniolo
+2026-10-22|Palermo|Teatro al Massimo
+2026-10-23|Palermo|Teatro al Massimo
+2026-10-24|Palermo|Teatro al Massimo
+2026-10-26|Napoli|Teatro Bellini
+2026-10-27|Napoli|Teatro Bellini
+2026-10-28|Napoli|Teatro Bellini
+2026-11-05|Bologna|Teatro Duse
+2026-11-06|Bologna|Teatro Duse
+2026-11-07|Bologna|Teatro Duse
+2026-11-09|Milano|Teatro Dal Verme
+2026-11-10|Milano|Teatro Dal Verme
+2026-11-11|Milano|Teatro Dal Verme
+2026-11-12|Genova|Teatro Verdi
+2026-11-13|Genova|Teatro Verdi
+2026-11-14|Genova|Teatro Verdi
+2026-11-16|Firenze|Teatro Puccini
+2026-11-17|Firenze|Teatro Puccini
+2026-11-18|Firenze|Teatro Puccini
+2026-11-19|Ascoli Piceno|Teatro Ventidio Basso
+2026-11-20|Ascoli Piceno|Teatro Ventidio Basso
+2026-11-21|Ascoli Piceno|Teatro Ventidio Basso
+2026-11-23|Bari|Teatro Piccinni
+2026-11-24|Bari|Teatro Piccinni
+2026-11-25|Bari|Teatro Piccinni
+2026-12-02|Torino|Teatro Colosseo
+2026-12-03|Torino|Teatro Colosseo
+2026-12-04|Torino|Teatro Colosseo
+2026-12-05|Trento|Teatro Sociale
+2026-12-06|Trento|Teatro Sociale
+2026-12-07|Trento|Teatro Sociale
+2026-12-21|Cagliari|Teatro Massimo
+2026-12-22|Cagliari|Teatro Massimo
+2026-12-23|Cagliari|Teatro Massimo
+2026-12-26|Roma|Auditorium Parco della Musica – Sala Petrassi
+2026-12-27|Roma|Auditorium Parco della Musica – Sala Petrassi
+2026-12-28|Roma|Auditorium Parco della Musica – Sala Petrassi
+2026-12-29|Roma|Auditorium Parco della Musica – Sala Petrassi
+2026-12-30|Roma|Auditorium Parco della Musica – Sala Petrassi"""),
+    ("Noemi", "TicketOne", "https://www.ticketone.it/en/artist/noemi/", "Noemi Live 2026", """
+2026-12-14|Milano|Teatro degli Arcimboldi
+2026-12-22|Roma|Auditorium Parco della Musica – Sala Santa Cecilia"""),
+    ("Rkomi", "TicketOne", "https://www.ticketone.it/en/artist/rkomi/", "Rkomi", """
+2026-11-03|Milano|Fabrique
+2026-11-04|Milano|Fabrique
+2026-11-11|Milano|Fabrique
+2026-11-13|Milano|Fabrique
+2026-11-24|Milano|Fabrique"""),
+    ("Rocco Hunt", "TicketOne", "https://www.ticketone.it/artist/rocco-hunt/", "Rocco Hunt & Clementino – Capocannonieri", """
+2027-03-10|Napoli|PalaPartenope"""),
+    ("Samurai Jay", "TicketOne", "https://www.ticketone.it/artist/samurai-jay/samuray-jay-dj-set-4254799/", "Samurai Jay – Halloween DJ set", """
+2026-10-30|Fontaneto d'Agogna|Pala Phenomenon"""),
+    ("Samurai Jay", "TicketOne", "https://www.ticketone.it/artist/samurai-jay/samurai-jay-amatore-in-concerto-4153798/", "Samurai Jay – Amatore in concerto", """
+2026-12-03|Napoli|Casa della Musica Federico I
+2026-12-09|Milano|Fabrique"""),
+    ("Will", "TicketOne", "https://www.ticketone.it/artist/will/", "Will", """
+2026-10-08|Milano|Santeria Toscana 31
+2026-10-09|Roncade|New Age Club"""),
 )
 
 db.executescript("""
@@ -567,7 +722,8 @@ def same_concert_place(city_a, venue_a, city_b, venue_b):
         name = normal(re.sub(r"\s*\([A-Za-z]{2,}\)$", "", value or ""))
         return {"milan": "milano", "turin": "torino", "rome": "roma",
                 "naples": "napoli", "florence": "firenze", "padua": "padova",
-                "bitritto bari": "bitritto"}.get(name, name)
+                "bitritto bari": "bitritto",
+                "montecatini terme": "montecatini"}.get(name, name)
 
     def venue_key(value):
         name = normal(value or "")
@@ -589,6 +745,21 @@ def same_concert_place(city_a, venue_a, city_b, venue_b):
             "teatro carlo gesualdo": "teatro gesualdo",
             "auditorium conciliazione": "conciliazione",
             "teatro conciliazione": "conciliazione",
+            "nuovo teatro verdi": "teatro verdi",
+            "palaprometeo estra": "palaprometeo",
+            "pala prometeo estra": "palaprometeo",
+            "pala prometeo": "palaprometeo",
+            "nelson mandela forum": "mandela forum",
+            "teatro della concordia": "teatro concordia",
+            "teatro lirico giorgio gaber": "teatro lirico",
+            "teatro della corte ivo chiesa": "teatro della corte",
+            "teatro cartiere carrara ex tuscanyhall": "teatro cartiere carrara",
+            "tuscanyhall teatro cartiere carrara": "teatro cartiere carrara",
+            "palaunical arena": "palaunical",
+            "palabam": "palaunical",
+            "teatro dis play c o brixia forum": "teatro dis play",
+            "viper theatre c o otel club": "viper theatre otel club",
+            "forum": "unipol forum",
         }
         return aliases.get(name, name)
 
@@ -597,7 +768,9 @@ def same_concert_place(city_a, venue_a, city_b, venue_b):
         return False
     first, second = city_key(city_a), city_key(city_b)
     return bool(first and second) and (first == second or
-        (venue == "unipol forum" and {first, second} == {"milano", "assago"}))
+        (venue == "unipol forum" and {first, second} == {"milano", "assago"}) or
+        (venue == "unipol arena" and
+         {first, second} == {"bologna", "casalecchio di reno"}))
 
 
 def other_source_has_event(date, city, venue, artists, source):
@@ -1147,6 +1320,123 @@ def import_reviewed_concerts(preview=False, today=None):
             "duplicates": duplicates, "new": len(missing), "preview": preview}
 
 
+def verified_concert_rows():
+    """Validate the reviewed source snapshot before touching the live database."""
+    rows, seen = [], set()
+    for artist, source, url, title, listing in VERIFIED_TOURS_2026_10_08:
+        if not db.execute("SELECT 1 FROM sanremo_artists WHERE name=?", (artist,)).fetchone():
+            raise ValueError(f"Artist is not in the Sanremo roster: {artist}")
+        if not valid_listing_url(url) or not source.strip() or not title.strip():
+            raise ValueError(f"Incomplete official source for {artist}")
+        for line in listing.strip().splitlines():
+            cells = [cell.strip() for cell in line.split("|")]
+            if len(cells) != 3:
+                raise ValueError(f"Invalid concert listing: {line}")
+            date, city, venue = cells
+            if not parse_calendar_day(date) or not city or not venue:
+                raise ValueError(f"Incomplete concert listing: {line}")
+            key = (artist, date)
+            if key in seen:
+                raise ValueError(f"Repeated artist/date in source snapshot: {key}")
+            seen.add(key)
+            rows.append((artist, source, url, title, date, city, venue))
+    return rows
+
+
+# A reviewed snapshot and a Ticketmaster event represent the same show. Keep
+# the Ticketmaster record so its event ID can continue receiving API updates.
+KNOWN_DUPLICATE_CONCERTS = (
+    ("Arisa", "2026-11-19", "ZG9rmIYnyZe77A",
+     "reviewed:8d0365eea6ade8f76d7e038f"),
+    ("Elodie", "2027-04-24", "Z59rmIYnyZ7FF",
+     "reviewed:f4a6110054d1fa791d76fa81"),
+    ("Elodie", "2027-05-22", "Z59rmIYnyZ7ak",
+     "reviewed:3abad71f72688d9bcd1e0171"),
+)
+
+
+def reconcile_verified_concerts(preview=True, today=None):
+    """Add official dates without alerts; remove only three verified duplicates.
+
+    Repeat runs are safe. Another concert at the same artist/date but a
+    different venue is left untouched and reported for human review.
+    """
+    today = today or dt.datetime.now(ROME).date()
+    rows = verified_concert_rows()
+    duplicates, duplicate_checks = [], []
+    for artist, date, keep_id, remove_id in KNOWN_DUPLICATE_CONCERTS:
+        pair = db.execute("""SELECT c.event_id, c.source, c.city, c.venue,
+            c.concert_date, a.artist FROM concerts c
+            JOIN concert_artists a ON a.event_id=c.event_id
+            WHERE c.event_id IN (?, ?) AND a.artist=?""",
+            (keep_id, remove_id, artist)).fetchall()
+        by_id = {item[0]: item for item in pair}
+        if remove_id not in by_id:
+            continue  # Already cleaned, or never present in this live DB.
+        keep, remove = by_id.get(keep_id), by_id[remove_id]
+        if (not keep or keep[1] != "Ticketmaster" or
+                not remove[1].startswith("Reviewed:") or
+                keep[4] != date or remove[4] != date or
+                not same_concert_place(keep[2], keep[3], remove[2], remove[3])):
+            duplicate_checks.append(f"{artist} {date}: records changed; left intact")
+            continue
+        duplicates.append((keep_id, remove_id))
+
+    added, existing, past, conflicts = [], 0, 0, []
+    for row in rows:
+        artist, source, url, title, date, city, venue = row
+        if dt.date.fromisoformat(date) < today:
+            past += 1
+            continue
+        matches = db.execute("""SELECT c.event_id, c.source, c.city, c.venue,
+            c.status FROM concerts c JOIN concert_artists a
+            ON a.event_id=c.event_id WHERE a.artist=? AND c.concert_date=?""",
+            (artist, date)).fetchall()
+        matches = [m for m in matches if m[0] not in {r for _, r in duplicates}]
+        if any(same_concert_place(city, venue, m[2], m[3]) and
+               m[4] in ('CONFIRMED', 'RESCHEDULED') for m in matches):
+            existing += 1
+        elif matches:
+            conflicts.append(f"{artist} {date}: check saved location/status")
+        else:
+            added.append(row)
+
+    if not preview and (added or duplicates):
+        # An on-host backup includes videos and all other tables. Never replace
+        # an earlier backup from this batch on a second run.
+        backup_path = DB_PATH.with_name("videos_before_concerts_2026_10_08.sqlite3")
+        if not backup_path.exists():
+            with sqlite3.connect(backup_path) as backup:
+                db.backup(backup)
+        now = dt.datetime.now(dt.timezone.utc).isoformat()
+        with db:
+            for keep_id, remove_id in duplicates:
+                db.execute("UPDATE concert_history SET event_id=? WHERE event_id=?",
+                           (keep_id, remove_id))
+                db.execute("""UPDATE concert_notifications SET event_id=?
+                    WHERE event_id=? AND sent_at IS NOT NULL""", (keep_id, remove_id))
+                db.execute("""DELETE FROM concert_notifications WHERE event_id=?
+                    AND sent_at IS NULL""", (remove_id,))
+                db.execute("DELETE FROM concert_artists WHERE event_id=?", (remove_id,))
+                db.execute("DELETE FROM concerts WHERE event_id=?", (remove_id,))
+            for artist, source, url, title, date, city, venue in added:
+                identity = "\0".join((artist, date, city, venue))
+                event_id = "verified:" + hashlib.sha256(
+                    identity.encode("utf-8")).hexdigest()[:24]
+                db.execute("""INSERT INTO concerts(event_id, source, event_name,
+                    concert_date, city, region, venue, url, status,
+                    ticket_status, first_seen, last_seen)
+                    VALUES (?, ?, ?, ?, ?, '', ?, ?, 'CONFIRMED',
+                            'not checked', ?, ?)""",
+                    (event_id, "Reviewed: " + source, title, date, city,
+                     venue, url, now, now))
+                db.execute("INSERT INTO concert_artists(event_id, artist) VALUES (?, ?)",
+                           (event_id, artist))
+    return {"total": len(rows), "added": len(added), "existing": existing,
+            "past": past, "duplicates": len(duplicates),
+            "conflicts": conflicts + duplicate_checks, "preview": preview}
+
+
 def catalogue_rows(artist="", city="", venue="", from_date="", to_date="",
                    status="", source="", include_past=False, today=None):
     """Return catalogue rows in date order, including entries with no date."""
@@ -1414,6 +1704,40 @@ async def importconcerts(interaction: discord.Interaction, preview: bool = False
                  + "This batch does not post alerts. Source links are saved; "
                    "later schedule changes need a fresh check or `/editconcert`.")
     await interaction.followup.send(reply, ephemeral=True,
+                                    allowed_mentions=discord.AllowedMentions.none())
+
+
+@tree.command(name="refreshconcertdata",
+              description="Add checked official dates and remove known duplicates",
+              guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(preview="True: show changes; False: save them")
+async def refreshconcertdata(interaction: discord.Interaction, preview: bool = True):
+    if interaction.user.id != OWNER_ID:
+        await interaction.response.send_message("This command is private.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        async with concert_lock:
+            result = reconcile_verified_concerts(preview=preview)
+    except Exception as exc:
+        print(f"Verified concert refresh failed: {type(exc).__name__}: {exc}")
+        await interaction.followup.send(
+            "No verified batch was saved. See FadeHost's live console.", ephemeral=True)
+        return
+    verb = "would add" if preview else "added"
+    removed = "would remove" if preview else "removed"
+    reply = (f"Checked official listings: {result['total']} dates; "
+             f"{result['added']} {verb}; {result['existing']} already saved; "
+             f"{result['past']} past; {result['duplicates']} duplicate copies "
+             f"{removed}. No alerts are posted by this batch. ")
+    if result["conflicts"]:
+        reply += (f"{len(result['conflicts'])} location/status conflicts were left "
+                  "untouched: " + "; ".join(result["conflicts"][:5]) + ". ")
+    if preview:
+        reply += "Run `/refreshconcertdata preview:False` to apply these changes."
+    else:
+        reply += "You can check `/concerts` or run `/exportconcerts` again."
+    await interaction.followup.send(reply[:1900], ephemeral=True,
                                     allowed_mentions=discord.AllowedMentions.none())
 
 
