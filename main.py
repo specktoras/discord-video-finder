@@ -2045,4 +2045,113 @@ async def before_weekly_concerts():
     await bot.wait_until_ready()
 
 
+
+# --- RAYE Discovery API diagnostics ---
+# Read-only diagnostic, independent of /rayeintel. Never attach raw HTTP responses,
+# request URLs, or exception messages that may contain the configured API key.
+@tree.command(name="rayediag", description="Diagnose public Ticketmaster API visibility for RAYE",
+              guild=discord.Object(id=GUILD_ID))
+async def rayediag(interaction: discord.Interaction):
+    if interaction.user.id != OWNER_ID:
+        await interaction.response.send_message("This command is private.", ephemeral=True)
+        return
+    if not TM_KEY:
+        await interaction.response.send_message(
+            "TICKETMASTER_API_KEY is not configured on FadeHost.", ephemeral=True)
+        return
+    await interaction.response.defer(thinking=True, ephemeral=True)
+
+    target_id = "1F00654789A2159B"
+    hall_id = "KovZ9177Arf"
+    focus_start, focus_end = "2026-10-22T00:00:00Z", "2026-10-25T00:00:00Z"
+
+    async def probe(session, title, endpoint, params=None, direct=False):
+        # Keep the HTTP status even on 404. tm_get() deliberately discards it.
+        supplied = {**(params or {}), "apikey": TM_KEY}
+        record = {"probe": title, "httpStatus": None}
+        try:
+            async with session.get(TM_ROOT + endpoint, params=supplied) as res:
+                record["httpStatus"] = res.status
+                if res.status != 200:
+                    # No response bodies: avoid echoing a URL, key or sensitive data.
+                    record["result"] = "not_available" if res.status == 404 else "http_error"
+                    return record
+                data = await res.json(content_type=None)
+            if not isinstance(data, dict):
+                record["result"] = "unexpected_json_type"
+                return record
+            if direct:
+                record["result"] = "event_found" if data.get("id") else "no_event_id"
+                record["event"] = {k: data.get(k) for k in ("id", "name", "url")}
+                record["event"]["date"] = data.get("dates", {}).get("start", {}).get("localDate")
+                record["presaleNames"] = [p.get("name") for p in data.get("sales", {}).get("presales", [])]
+                record["priceRanges"] = data.get("priceRanges", [])
+            else:
+                events = data.get("_embedded", {}).get("events", [])
+                record["result"] = "search_ok"
+                record["totalElements"] = data.get("page", {}).get("totalElements", 0)
+                record["returnedElements"] = len(events)
+                record["samples"] = [{
+                    "id": ev.get("id"), "name": ev.get("name"),
+                    "date": ev.get("dates", {}).get("start", {}).get("localDate"),
+                    "url": ev.get("url")
+                } for ev in events[:8]]
+                record["rayeTargetMatch"] = any(ev.get("id") == target_id for ev in events)
+                record["october23Samples"] = [
+                    {"id": ev.get("id"), "name": ev.get("name")}
+                    for ev in events if ev.get("dates", {}).get("start", {}).get("localDate") == "2026-10-23"
+                ][:12]
+            return record
+        except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError, ValueError) as exc:
+            record["result"] = "request_exception"
+            record["exceptionType"] = type(exc).__name__  # Never include str(exc)
+            return record
+
+    checks = []
+    probes = [
+        ("Direct event ID", f"/events/{target_id}.json", None, True),
+        ("Event search by exact ID", "/events.json", {"id": target_id, "size": 5}, False),
+        ("RAYE keyword any date", "/events.json", {"keyword": "RAYE", "countryCode": "GB", "size": 20}, False),
+        ("RAYE keyword event week", "/events.json", {
+            "keyword": "RAYE", "countryCode": "GB", "startDateTime": focus_start,
+            "endDateTime": focus_end, "size": 50}, False),
+        ("Royal Albert Hall event week", "/events.json", {
+            "venueId": hall_id, "startDateTime": focus_start,
+            "endDateTime": focus_end, "size": 100}, False),
+        ("Royal Albert Hall wider autumn", "/events.json", {
+            "venueId": hall_id, "startDateTime": "2026-10-01T00:00:00Z",
+            "endDateTime": "2026-12-01T00:00:00Z", "size": 30}, False),
+        ("Other London events event week", "/events.json", {
+            "city": "London", "countryCode": "GB", "startDateTime": focus_start,
+            "endDateTime": focus_end, "size": 10}, False),
+    ]
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=18)) as session:
+        for title, endpoint, params, direct in probes:
+            checks.append(await probe(session, title, endpoint, params, direct))
+            await asyncio.sleep(0.35)
+
+    report = {
+        "checkedAtUtc": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "targetTicketmasterId": target_id,
+        "venueId": hall_id,
+        "diagnosticVersion": 2,
+        "checks": checks,
+        "note": "Discovery API metadata only; does not show live ticket inventory. HTTP 404 means the event was unavailable on this public API endpoint, not that tickets are sold out."
+    }
+    summary = ["🔮 **RAYE — Ticketmaster API diagnostics (v2)**"]
+    for row in checks:
+        status = row.get("httpStatus")
+        if row["probe"] == "Direct event ID":
+            extra = row.get("result", "unknown")
+        else:
+            extra = (f"{row.get('totalElements', '?')} total results" if status == 200
+                     else row.get("result", "unknown"))
+        summary.append(f"• **{row['probe']}**: HTTP {status or '—'} — {extra}")
+    summary.append("⚠️ 404 ≠ sold out; API visibility ≠ ticket availability.")
+    import json
+    attachment = discord.File(io.BytesIO(json.dumps(report, indent=2, ensure_ascii=False).encode("utf-8")),
+                              filename="raye_ticketmaster_diagnostics_v2.json")
+    await interaction.followup.send("\n".join(summary)[:1900], file=attachment,
+                                    ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
 bot.run(TOKEN)
