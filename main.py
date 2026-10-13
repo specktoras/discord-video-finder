@@ -1876,6 +1876,151 @@ async def deleteconcert(interaction: discord.Interaction, event_id: str):
         allowed_mentions=discord.AllowedMentions.none())
 
 
+# --- One-off Royal Albert Hall / RAYE official Ticketmaster API investigation ---
+# Read only: no basket/queue access, ticket purchasing, DB writes, or background polling.
+RAYE_TM_EVENT_ID = "1F00654789A2159B"
+RAYE_DATE = "2026-10-23"
+
+
+def raye_tm_summary(event):
+    """Keep only useful, public metadata; never include API credentials."""
+    if not event or not event.get("id"):
+        return None
+    embedded = event.get("_embedded", {})
+    return {
+        "id": event.get("id"),
+        "name": event.get("name"),
+        "url": event.get("url"),
+        "date": event.get("dates", {}).get("start", {}).get("localDate"),
+        "time": event.get("dates", {}).get("start", {}).get("localTime"),
+        "status": event.get("dates", {}).get("status", {}).get("code"),
+        "sales": event.get("sales", {}),
+        "priceRanges": event.get("priceRanges", []),
+        "info": event.get("info"),
+        "pleaseNote": event.get("pleaseNote"),
+        "ticketLimit": event.get("ticketLimit"),
+        "venues": [{"name": v.get("name"), "id": v.get("id"),
+                    "city": v.get("city", {}).get("name")}
+                   for v in embedded.get("venues", [])],
+        "attractions": [{"name": a.get("name"), "id": a.get("id")}
+                        for a in embedded.get("attractions", [])],
+    }
+
+
+@tree.command(name="rayeintel", description="Inspect RAYE ticket sale metadata via the official Ticketmaster API",
+              guild=discord.Object(id=GUILD_ID))
+async def rayeintel(interaction: discord.Interaction):
+    if interaction.user.id != OWNER_ID:
+        await interaction.response.send_message("This command is private.", ephemeral=True)
+        return
+    if not TM_KEY:
+        await interaction.response.send_message(
+            "TICKETMASTER_API_KEY is not configured on FadeHost.", ephemeral=True)
+        return
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    errors = []
+    direct, artist_hits, hall_hits = None, [], []
+    venue_info = None
+    start, end = "2026-10-22T00:00:00Z", "2026-10-25T00:00:00Z"
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25)) as session:
+            try:
+                response = await tm_get(session, f"/events/{RAYE_TM_EVENT_ID}.json")
+                direct = raye_tm_summary(response)
+            except (TicketmasterUnavailable, aiohttp.ClientError, asyncio.TimeoutError,
+                    RuntimeError, ValueError) as exc:
+                errors.append(f"Direct ID: {type(exc).__name__}: {exc}")
+            try:
+                response = await tm_get(session, "/events.json", {
+                    "keyword": "RAYE", "countryCode": "GB",
+                    "startDateTime": start, "endDateTime": end, "size": 100,
+                })
+                artist_hits = [raye_tm_summary(e) for e in
+                               response.get("_embedded", {}).get("events", [])
+                               if e.get("dates", {}).get("start", {}).get("localDate") == RAYE_DATE]
+            except (TicketmasterUnavailable, aiohttp.ClientError, asyncio.TimeoutError,
+                    RuntimeError, ValueError) as exc:
+                errors.append(f"Artist search: {type(exc).__name__}: {exc}")
+            try:
+                response = await tm_get(session, "/venues.json", {
+                    "keyword": "Royal Albert Hall", "countryCode": "GB", "size": 30,
+                })
+                halls = [v for v in response.get("_embedded", {}).get("venues", [])
+                         if "royal albert hall" in v.get("name", "").casefold()
+                         and v.get("city", {}).get("name", "").casefold() == "london"]
+                if halls:
+                    hall = halls[0]
+                    venue_info = {"name": hall.get("name"), "id": hall.get("id")}
+                    response = await tm_get(session, "/events.json", {
+                        "venueId": hall["id"], "startDateTime": start,
+                        "endDateTime": end, "size": 100,
+                    })
+                    hall_hits = [raye_tm_summary(e) for e in
+                                 response.get("_embedded", {}).get("events", [])
+                                 if e.get("dates", {}).get("start", {}).get("localDate") == RAYE_DATE]
+            except (TicketmasterUnavailable, aiohttp.ClientError, asyncio.TimeoutError,
+                    RuntimeError, ValueError) as exc:
+                errors.append(f"Venue search: {type(exc).__name__}: {exc}")
+    except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
+        errors.append(f"Connection: {type(exc).__name__}: {exc}")
+
+    def event_ids(items):
+        return sorted({x["id"] for x in items if x and x.get("id")})
+
+    ids = sorted(set(event_ids(artist_hits) + event_ids(hall_hits)))
+    all_events = {x["id"]: x for x in [direct, *artist_hits, *hall_hits]
+                  if x and x.get("id")}
+    report = {
+        "checkedAtUtc": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "targetTicketmasterId": RAYE_TM_EVENT_ID,
+        "directIdLookup": direct,
+        "artistSearchResultsOnOctober23": artist_hits,
+        "royalAlbertHallVenue": venue_info,
+        "venueSearchResultsOnOctober23": hall_hits,
+        "uniqueEventIdsFromSearches": ids,
+        "errors": errors,
+        "important": "Discovery API metadata is not live seat availability or proof of bookable tickets."
+    }
+    lines = ["🎟️ **RAYE — Ticketmaster API intelligence**",
+             "Date: 23 October 2026 | Royal Albert Hall",
+             f"**Direct event-ID lookup:** {'FOUND ✅' if direct else 'Not returned ⚠️'}",
+             f"**RAYE artist search:** {len(artist_hits)} event(s) on 23 October",
+             f"**Royal Albert Hall date search:** {len(hall_hits)} event(s) on 23 October",
+             f"**Additional event IDs discovered:** {len(set(ids) - {RAYE_TM_EVENT_ID})}"]
+    if direct:
+        lines.extend([
+            f"**API event:** {direct.get('name') or 'Unknown'}",
+            f"**On-sale status:** {direct.get('status') or 'Not supplied'}",
+            f"**Official URL:** {direct.get('url') or 'Not supplied'}",
+        ])
+        public = direct.get("sales", {}).get("public", {})
+        lines.append(f"**Public sale starts (UTC):** {public.get('startDateTime', 'Not supplied')}")
+        ranges = direct.get("priceRanges", [])
+        prices = ", ".join(f"{p.get('currency','')} {p.get('min','?')}-{p.get('max','?')}"
+                           for p in ranges)
+        lines.append(f"**Price ranges:** {prices or 'Not supplied'}")
+        presales = direct.get("sales", {}).get("presales", [])
+        lines.append(f"**Presales supplied:** {len(presales)}")
+        for p in presales[:8]:
+            lines.append(f"• {p.get('name','Unnamed')}: {p.get('startDateTime','time not supplied')}"
+                         + (f" — {p['url']}" if p.get('url') else " — no presale URL supplied"))
+    if ids:
+        lines.append("**IDs found via public searches:** " + ", ".join(ids[:12]))
+    if errors:
+        lines.append("**Query errors:** " + "; ".join(errors)[:250])
+    lines.append("⚠️ Metadata only; does not confirm tickets or separate allocations.")
+
+    # Never attach raw HTTP responses or request URLs: they could carry the API key.
+    import json
+    payload = json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8")
+    file = discord.File(io.BytesIO(payload), filename="raye_ticketmaster_intel.json")
+    summary = "\n".join(lines)
+    if len(summary) > 1800:
+        summary = summary[:1750] + "\n(Full details in attached JSON.)"
+    await interaction.followup.send(summary, file=file, ephemeral=True,
+                                    allowed_mentions=discord.AllowedMentions.none())
+
+
 # This task wakes daily at 09:00 London time, but calls the research API only
 # on Friday. A persisted marker prevents a second automatic Friday check.
 @tasks.loop(time=dt.time(hour=9, minute=0, tzinfo=LONDON))
