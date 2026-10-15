@@ -1,7 +1,7 @@
 """Private, on-demand Google Hotels results and SQLite price history for discord.py.
 
-V2.1: clean clickable links in embed VALUES (Discord does not parse links in
-embed FIELD NAMES); add /hotelstatus to diagnose persistent data storage.
+V2.2: combine known Italian city aliases for hotel price history. Historical
+search labels, timestamps and prices are preserved; no new scheduled work.
 
 Integration: register_hotel_commands(tree) once before tree.sync().
 No timers or background hotel-price polling. /hotels uses ONE SerpApi request.
@@ -84,6 +84,16 @@ def _db_connect():
     for name, dtype in EXTRA_COLUMNS.items():
         if name not in current:
             con.execute(f'ALTER TABLE hotel_prices ADD COLUMN {name} {dtype}')
+    check_columns = {r['name'] for r in con.execute('PRAGMA table_info(hotel_checks)')}
+    if 'destination_key' not in check_columns:
+        con.execute('ALTER TABLE hotel_checks ADD COLUMN destination_key TEXT')
+    # Non-destructive migration: keep original destination, IDs, prices and dates.
+    missing = con.execute("SELECT id, destination FROM hotel_checks WHERE destination_key IS NULL OR destination_key = ''").fetchall()
+    if missing:
+        con.executemany('UPDATE hotel_checks SET destination_key=? WHERE id=?',
+                        [(_destination_key(r['destination']), r['id']) for r in missing])
+    con.execute('''CREATE INDEX IF NOT EXISTS idx_checks_trip_key ON hotel_checks
+        (destination_key, checkin, checkout, adults, currency, searched_at, id)''')
     con.commit()
     return con
 
@@ -91,6 +101,50 @@ def _db_connect():
 def _normalized(s: str):
     s = unicodedata.normalize('NFKD', s or '').encode('ascii', 'ignore').decode().lower()
     return re.sub(r'[^a-z0-9]+', ' ', s).strip()
+
+
+# Explicit, conservative aliases. Unknown geographic qualifiers are NEVER stripped.
+# For example, 'Milan, Michigan, USA' is distinct from 'Milan, Italy'.
+_ITALIAN_CITY_ALIASES = {
+    'turin': ('turin', 'torino'),
+    'milan': ('milan', 'milano'),
+    'rome': ('rome', 'roma'),
+    'florence': ('florence', 'firenze'),
+    'naples': ('naples', 'napoli'),
+    'venice': ('venice', 'venezia'),
+    'bologna': ('bologna',),
+}
+_ITALY_TOKENS = ('italy', 'italia', 'it')
+_ITALIAN_CITY_REGIONS = {
+    'turin': ('piedmont', 'piemonte'),
+    'milan': ('lombardy', 'lombardia'),
+    'rome': ('lazio',),
+    'florence': ('tuscany', 'toscana'),
+    'naples': ('campania',),
+    'venice': ('veneto',),
+    'bologna': ('emilia romagna',),
+}
+
+
+def _destination_key(city: str) -> str:
+    """Group only known city aliases, never guess unknown country/region names."""
+    place = _normalized(city)
+    if not place:
+        return ''
+    for canonical, aliases in _ITALIAN_CITY_ALIASES.items():
+        valid = set(aliases)
+        for name in aliases:
+            for country in _ITALY_TOKENS:
+                valid.add(f'{name} {country}')
+                valid.add(f'{country} {name}')
+            for region in _ITALIAN_CITY_REGIONS[canonical]:
+                valid.add(f'{name} {region}')
+                for country in _ITALY_TOKENS:
+                    valid.add(f'{name} {region} {country}')
+                    valid.add(f'{name} {country} {region}')
+        if place in valid:
+            return f'{canonical} italy'
+    return place
 
 
 def _price(obj):
@@ -165,18 +219,19 @@ def _row(p):
 def _snapshot(destination, checkin, checkout, adults, currency, budget, rows):
     with _db_connect() as c:
         prev = c.execute('''SELECT id, searched_at FROM hotel_checks
-            WHERE destination=? AND checkin=? AND checkout=? AND adults=? AND currency=?
-            ORDER BY id DESC LIMIT 1''',
-            (_normalized(destination), checkin, checkout, adults, currency)).fetchone()
+            WHERE destination_key=? AND checkin=? AND checkout=? AND adults=? AND currency=?
+            ORDER BY searched_at DESC, id DESC LIMIT 1''',
+            (_destination_key(destination), checkin, checkout, adults, currency)).fetchone()
         prev_rows = {}
         if prev:
             for r in c.execute('SELECT * FROM hotel_prices WHERE check_id=?', (prev['id'],)):
                 prev_rows[r['property_key']] = dict(r)
         now = dt.datetime.now(dt.timezone.utc).isoformat()
         cur = c.execute('''INSERT INTO hotel_checks
-            (searched_at,destination,checkin,checkout,adults,currency,budget,property_count)
-            VALUES (?,?,?,?,?,?,?,?)''',
-            (now, _normalized(destination), checkin, checkout, adults, currency, budget, len(rows)))
+            (searched_at,destination,destination_key,checkin,checkout,adults,currency,budget,property_count)
+            VALUES (?,?,?,?,?,?,?,?,?)''',
+            (now, _normalized(destination), _destination_key(destination), checkin,
+             checkout, adults, currency, budget, len(rows)))
         columns = ['check_id', 'property_key', 'hotel_name', 'property_type',
                    'nightly_price', 'total_price', 'rating', 'address',
                    'property_token', 'hotel_url', 'booking_sources', *EXTRA_COLUMNS]
@@ -351,10 +406,11 @@ def _look_up_hotel(query):
         return None, 'Please enter a hotel name.'
     with _db_connect() as c:
         rows = c.execute('''SELECT p.*, c.searched_at, c.destination, c.checkin,
-                         c.checkout, c.adults, c.currency, c.id AS history_check_id
+                         c.checkout, c.adults, c.currency, c.destination_key,
+                         c.id AS history_check_id
                          FROM hotel_prices p
                          JOIN hotel_checks c ON p.check_id=c.id
-                         ORDER BY c.id DESC LIMIT 2000''').fetchall()
+                         ORDER BY c.searched_at DESC, c.id DESC LIMIT 2000''').fetchall()
         matches = [dict(r) for r in rows if needle in _normalized(r['hotel_name'])]
         if not matches:
             return None, 'No matching hotel in your saved searches. Try /hotels first.'
@@ -366,11 +422,13 @@ def _look_up_hotel(query):
             if len(distinct) > 1:
                 return None, 'Several hotels match. Please use a more specific name: ' + ', '.join(distinct[:6])
             selected = matches[0]
-        older_check = c.execute('''SELECT id, searched_at FROM hotel_checks WHERE destination=?
-             AND checkin=? AND checkout=? AND adults=? AND currency=? AND id<?
-             ORDER BY id DESC LIMIT 1''',
-             (selected['destination'], selected['checkin'], selected['checkout'],
-              selected['adults'], selected['currency'], selected['history_check_id'])).fetchone()
+        older_check = c.execute('''SELECT id, searched_at FROM hotel_checks WHERE destination_key=?
+             AND checkin=? AND checkout=? AND adults=? AND currency=?
+             AND (searched_at < ? OR (searched_at=? AND id<?))
+             ORDER BY searched_at DESC, id DESC LIMIT 1''',
+             (selected['destination_key'], selected['checkin'], selected['checkout'],
+              selected['adults'], selected['currency'], selected['searched_at'],
+              selected['searched_at'], selected['history_check_id'])).fetchone()
         old = None
         if older_check:
             prior_rows = [dict(r) for r in c.execute(
@@ -421,14 +479,25 @@ def _detail_embed(row, older, previous):
 
 
 
+def _history_rows(city: str, checkin: str, checkout: str, adults: int = 1, currency: str = 'GBP'):
+    """Read aliases together in chronological order, without API calls."""
+    with _db_connect() as c:
+        rows = c.execute('''SELECT id, searched_at, property_count, destination
+            FROM hotel_checks WHERE destination_key=? AND checkin=? AND checkout=?
+            AND adults=? AND currency=? ORDER BY searched_at DESC, id DESC LIMIT 100''',
+            (_destination_key(city), checkin, checkout, adults, currency)).fetchall()
+        return [dict(r) for r in rows]
+
+
 def _database_status():
     """Read-only diagnostics. Never calls SerpApi; helpful after deployment."""
     c = _db_connect()
     try:
         total_checks = c.execute('SELECT COUNT(*) FROM hotel_checks').fetchone()[0]
         total_prices = c.execute('SELECT COUNT(*) FROM hotel_prices').fetchone()[0]
-        recent = c.execute("""SELECT id,searched_at,destination,checkin,checkout,adults,property_count
-            FROM hotel_checks ORDER BY id DESC LIMIT 6""").fetchall()
+        recent = c.execute("""SELECT id,searched_at,destination,destination_key,
+                   checkin,checkout,adults,property_count
+            FROM hotel_checks ORDER BY searched_at DESC, id DESC LIMIT 6""").fetchall()
         resolved_path = str(Path(DB_PATH).resolve())
         filesize = Path(DB_PATH).stat().st_size if Path(DB_PATH).exists() else 0
         return {
@@ -449,7 +518,7 @@ def _status_embed(status):
                      f'**Saved hotel quotes:** {status["quotes"]}\n'
                      f'**Database size:** {status["size"]:,} bytes\n'
                      f'**Database location:** `{status["path"][:250]}`\n\n'
-                     'ℹ️ Uses **zero** SerpApi credits.')
+                     'ℹ️ Uses **zero** SerpApi credits. City aliases share comparisons; original search labels are retained.')
     )
     recent = status['recent']
     if recent:
@@ -563,14 +632,11 @@ def register_hotel_commands(tree: app_commands.CommandTree):
             _night_count(checkin, checkout)
         except ValueError as e:
             return await interaction.response.send_message(str(e), ephemeral=True)
-        with _db_connect() as c:
-            checks = c.execute('''SELECT id, searched_at, property_count FROM hotel_checks
-                WHERE destination=? AND checkin=? AND checkout=? AND adults=? AND currency='GBP'
-                ORDER BY id DESC LIMIT 10''', (_normalized(city), checkin, checkout, adults)).fetchall()
+        checks = (await asyncio.to_thread(_history_rows, city, checkin, checkout, adults))[:10]
         if not checks:
             return await interaction.response.send_message('No saved checks for this trip yet.', ephemeral=True)
         lines = [f'📈 **Hotel price-check history: {_safe(city)} · {checkin} → {checkout}**']
         lines.extend(f'• {_stamp(r["searched_at"])} — {r["property_count"]} priced properties'
-                     for r in checks)
+                     f' (searched: {_safe(r["destination"], 40)})' for r in checks)
         lines.append('Use `/hotels` to compare prices; `/hoteldetails` to inspect saved hotel information.')
         await interaction.response.send_message('\n'.join(lines), ephemeral=True)
