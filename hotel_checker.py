@@ -1,5 +1,7 @@
 """Private, on-demand Google Hotels results and SQLite price history for discord.py.
 
+V2.4: multilingual dormitory detection and a zero-credit correction of saved
+unknown room-class labels (prices and historical snapshots preserved).
 V2.3: add opt-in room/provider offer inspection (one API credit per hotel).
 V2.2: combine known Italian city aliases for hotel price history. Historical
 search labels, timestamps and prices are preserved; no new scheduled work.
@@ -128,6 +130,22 @@ def _db_connect():
         CREATE INDEX IF NOT EXISTS idx_hotel_room_offer_check
             ON hotel_room_offers (offer_check_id, offer_key);
     ''')
+    # V2.4 data-only migration: reclassify previously unknown multilingual
+    # dorm beds WITHOUT modifying price, provider, timestamps, or search IDs.
+    # Marker keeps subsequent database connections inexpensive and idempotent.
+    con.execute("""CREATE TABLE IF NOT EXISTS hotel_migrations (
+        migration_key TEXT PRIMARY KEY, applied_at TEXT NOT NULL)""")
+    if not con.execute("SELECT 1 FROM hotel_migrations WHERE migration_key=?",
+                       ('room_multilingual_v24',)).fetchone():
+        old_unknown = con.execute("""SELECT id, room_name FROM hotel_room_offers
+            WHERE room_class='unknown'""").fetchall()
+        corrections = [(cls, row['id']) for row in old_unknown
+                       if (cls := _room_class(row['room_name'])) != 'unknown']
+        if corrections:
+            con.executemany('UPDATE hotel_room_offers SET room_class=? WHERE id=?',
+                            corrections)
+        con.execute('INSERT INTO hotel_migrations VALUES (?, ?)',
+                    ('room_multilingual_v24', dt.datetime.now(dt.timezone.utc).isoformat()))
     con.commit()
     return con
 
@@ -571,23 +589,85 @@ def _status_embed(status):
 # --- Optional provider / room inspection. One API call per /hoteloffers invocation. ---
 
 
+# Never translate entire room descriptions. Normalize diacritics and match
+# precise language-specific *shared-sleeping* phrases before private-room clues.
+# E.g. French "Lit dans Dortoir Mixte de 5 lits" is definitely a shared bed.
+_DORM_PATTERNS = (
+    # English
+    r"\b(?:dorm|dorms|dormitory|dormitories|hostel bed|bed in|bunk in|"
+    r"shared (?:room|bedroom|dorm|sleeping)|capsule|sleeping pod)\b",
+    # French: dortoir = sleeping dormitory; chambre partagee = shared room
+    r"\b(?:dortoirs?|chambre (?:partagee|commune|mixte)|lit en chambre commune)\b",
+    # Italian: dormitorio is a dormitory; posto letto is sold as a bed space
+    r"\b(?:letto in dormitorio|dormitorio (?:misto|mixto|condiviso|femminile|maschile)|camerat[ae]|posto letto|letto in (?:camera|stanza) "
+    r"condivisa|(?:camera|stanza) condivisa)\b",
+    # Spanish: 'dormitorio' alone can mean a PRIVATE bedroom, so require
+    # dorm/shared context. 'cama en dormitorio' denotes a bed offer.
+    r"\b(?:cama en (?:un )?dormitorio|cama en habitacion compartida|"
+    r"dormitorio (?:mixto|compartido|femenino|masculino)|"
+    r"habitacion (?:compartida|mixta))\b",
+    # Portuguese
+    r"\b(?:cama em dormitorio|dormitorio compartilhado|"
+    r"quarto (?:compartilhado|partilhado|coletivo))\b",
+    # German
+    r"\b(?:schlafsaal|mehrbettzimmer|gemeinschaftsschlafraum|"
+    r"gemeinschaftszimmer|bett im (?:gemischten )?schlafsaal)\b",
+)
+_PRIVATE_PATTERNS = (
+    # English room names
+    r"\b(?:private (?:room|bedroom)|single room|double room|twin room|"
+    r"triple room|quadruple room|family room|studio|apartment|"
+    r"entire (?:place|unit|home|property)|suite|king room|queen room|"
+    r"standard room|deluxe room|superior room|classic room|economy room|guest room)\b",
+    # French (salle = bathroom is not a private sleeping-room signal)
+    r"\b(?:chambre (?:privee|privative|individuelle|simple|double|matrimoniale)|"
+    r"appartement(?: entier)?)\b",
+    # Italian
+    r"\b(?:camera (?:privata|singola|doppia|matrimoniale)|stanza privata|"
+    r"appartamento(?: intero)?)\b",
+    # Spanish
+    r"\b(?:habitacion (?:privada|individual|doble|matrimonial)|"
+    r"apartamento(?: entero)?)\b",
+    # German
+    r"\b(?:einzelzimmer|doppelzimmer|privatzimmer|ferienwohnung)\b",
+    # Portuguese
+    r"\b(?:quarto (?:privativo|individual|duplo)|apartamento)\b",
+)
+
+
 def _room_class(room_name):
-    """Conservative keyword hint. Never assert checkout-confirmed exclusivity."""
+    """Conservative multilingual hints, never guaranteed exclusive occupancy."""
     name = _normalized(room_name)
     if not name:
         return 'unknown'
-    if re.search(r'\b(dorm(?:itory)?|hostel bed|bed in|bunk in|shared (?:room|bedroom|dorm)|capsule|sleeping pod)\b', name):
+    if any(re.search(pattern, name) for pattern in _DORM_PATTERNS):
         return 'dormitory_or_shared'
-    if re.search(r'\b(private (?:room|bedroom)|single room|double room|twin room|triple room|quadruple room|family room|studio|apartment|entire (?:place|unit|home|property)|suite|king room|queen room|standard room|deluxe room|superior room|classic room|economy room|guest room)\b', name):
+    if any(re.search(pattern, name) for pattern in _PRIVATE_PATTERNS):
         return 'likely_private'
     return 'unknown'
 
 
 def _bathroom_class(room_name, inclusions):
     content = _normalized(str(room_name) + ' ' + ' '.join(str(v) for v in inclusions))
-    if re.search(r'\b(shared|communal) (?:bathroom|toilet|bath|shower)\b', content):
+    shared = (
+        r'\b(?:shared|communal) (?:bathroom|toilet|bath|shower)\b',
+        r'\b(?:bagno (?:in comune|condiviso)|servizi igienici in comune)\b',
+        r'\b(?:salle de bains? (?:commune|partagee)|douche commune)\b',
+        r'\b(?:bano compartido|bano comun)\b',
+        r'\b(?:gemeinschaftsbad|gemeinschaftsbadzimmer|gemeinschafts wc)\b',
+        r'\b(?:banheiro (?:compartilhado|partilhado))\b',
+    )
+    private = (
+        r'\b(?:private|ensuite|en suite|own) (?:bathroom|toilet|bath|shower)\b',
+        r'\b(?:bagno privato|bagno in camera)\b',
+        r'\b(?:salle de bains? (?:privee|privative))\b',
+        r'\b(?:bano privado)\b',
+        r'\b(?:eigenes badezimmer|privates badezimmer)\b',
+        r'\b(?:banheiro privativo)\b',
+    )
+    if any(re.search(p, content) for p in shared):
         return 'shared'
-    if re.search(r'\b(private|ensuite|en suite|own) (?:bathroom|toilet|bath|shower)\b', content):
+    if any(re.search(p, content) for p in private):
         return 'private_described'
     return 'not_specified'
 
@@ -686,8 +766,16 @@ def _offer_history(hotel):
             WHERE destination_key=? AND checkin=? AND checkout=? AND adults=? AND currency=?
             ORDER BY searched_at DESC,id DESC LIMIT 150""",
             (hotel['destination_key'],hotel['checkin'],hotel['checkout'],hotel['adults'],hotel['currency'])).fetchall()
-        rows = [dict(r) for r in rows if _normalized(r['hotel_name']) == _normalized(hotel['hotel_name'])]
-        return rows[:12]
+        rows = [dict(r) for r in rows if _normalized(r['hotel_name']) == _normalized(hotel['hotel_name'])][:12]
+        # Use saved room types only; NO additional API requests.
+        for item in rows:
+            counts = dict(c.execute('''SELECT room_class, COUNT(*)
+                FROM hotel_room_offers WHERE offer_check_id=?
+                GROUP BY room_class''', (item['id'],)).fetchall())
+            item['shared_count'] = counts.get('dormitory_or_shared', 0)
+            item['private_count'] = counts.get('likely_private', 0)
+            item['unknown_count'] = counts.get('unknown', 0)
+        return rows
 
 
 def _offer_embeds(hotel, offers, checked, previous, old_offers, budget):
@@ -702,7 +790,7 @@ def _offer_embeds(hotel, offers, checked, previous, old_offers, budget):
                      f'**Budget:** {_money(budget)} for the full stay · GBP\n'
                      f'**Checked:** {_stamp(checked)}\n'
                      f'**Compared with:** {_stamp(previous["searched_at"]) if previous else "No previous room-offer check"}\n\n'
-                     f'✅ **{len(likely_in_budget)} likely-private offers ≤ budget** · '
+                     f'{"✅" if likely_in_budget else "🔎"} **{len(likely_in_budget)} likely-private offers ≤ budget** · '
                      f'❔ {len(unclear_in_budget)} unclear offers · '
                      f'🚫 {len(dorms)} dorm/shared offers excluded\n\n'
                      '**Likely private ≠ guaranteed.** Room names are clues, not proof of exclusivity; '
@@ -710,7 +798,12 @@ def _offer_embeds(hotel, offers, checked, previous, old_offers, budget):
     if not offers:
         header.add_field(name='No room-level rates supplied', value='Google returned no priced, named room offers for this hotel. Its headline price is still unverified.', inline=False)
     elif not shown:
-        header.add_field(name='Nothing suitable within budget', value='Google returned room offers, but none have a likely-private or unclear room category within this budget.', inline=False)
+        header.add_field(name='No suitable private-room offer identified', value='These returned offers are shared beds, priced above budget, or otherwise not suitable. This does NOT prove private rooms are sold out on other sites.', inline=False)
+    if dorms:
+        examples = '; '.join(f'{_safe(r["provider"],25)} {_money(r["total_price"])}: '
+                             f'{_safe(r["room_name"],65)}' for r in dorms[:3])
+        header.add_field(name='Excluded shared-sleeping offers (examples)',
+                         value=examples[:1000], inline=False)
     embeds=[header]
     for pos in range(0,len(shown),5):
         chunk=shown[pos:pos+5]
@@ -912,7 +1005,10 @@ def register_hotel_commands(tree: app_commands.CommandTree):
         else:
             lines=[f'🛏️ **Saved room-offer checks · {_safe(selected["hotel_name"],90)}**']
             for row in records:
-                lines.append(f'• {_stamp(row["searched_at"])} — {row["room_count"]} named rates')
+                lines.append(f'• {_stamp(row["searched_at"])} — {row["room_count"]} named rates '
+                             f'· 🛏️ {row["private_count"]} likely private '
+                             f'· 🚫 {row["shared_count"]} shared/dorm '
+                             f'· ❔ {row["unknown_count"]} unclear')
             lines.append('This is saved data and uses zero SerpApi credits.')
             message='\n'.join(lines)
         await interaction.response.send_message(message[:1900], ephemeral=True)
