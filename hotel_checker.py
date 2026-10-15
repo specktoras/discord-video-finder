@@ -1,5 +1,6 @@
 """Private, on-demand Google Hotels results and SQLite price history for discord.py.
 
+V2.6: exact-name hotel discovery, even when not shown in citywide results.
 V2.5: zero-credit saved-room-offers browser with over-budget rates, excluded dorms,
 provider links, and comparisons to an earlier saved detailed check.
 V2.4: multilingual dormitory detection and a zero-credit correction of saved
@@ -13,6 +14,8 @@ No timers or background hotel-price polling. /hotels uses ONE SerpApi request.
 /hoteloffers uses ONE extra request for ONE property, and saves room-offer history.
 /hoteldetails, /hotelhistory, /hotelsavedoffers and /hotelofferhistory
 read SQLite only (ZERO SerpApi credits).
+/hotelfind makes ONE SerpApi request for a specified hotel and stores the result
+without contaminating comparisons between full-city /hotels searches.
 """
 from __future__ import annotations
 
@@ -94,6 +97,10 @@ def _db_connect():
     check_columns = {r['name'] for r in con.execute('PRAGMA table_info(hotel_checks)')}
     if 'destination_key' not in check_columns:
         con.execute('ALTER TABLE hotel_checks ADD COLUMN destination_key TEXT')
+    # V2.6: targeted searches are saved separately from full-city snapshots.
+    # Existing rows are always citywide searches; no historical prices are changed.
+    if 'search_scope' not in check_columns:
+        con.execute("ALTER TABLE hotel_checks ADD COLUMN search_scope TEXT NOT NULL DEFAULT 'city'")
     # Non-destructive migration: keep original destination, IDs, prices and dates.
     missing = con.execute("SELECT id, destination FROM hotel_checks WHERE destination_key IS NULL OR destination_key = ''").fetchall()
     if missing:
@@ -271,11 +278,99 @@ def _row(p):
                 checkout_time=str(p.get('check_out_time') or '')[:40])
 
 
+
+# Exact-name search can return one hotel's details directly OR a properties list.
+# Never silently accept a similarly named hotel in a different city.
+_CITY_CENTRES = {
+    'turin italy': (45.0678, 7.6825),
+    'milan italy': (45.4642, 9.1900),
+    'rome italy': (41.9028, 12.4964),
+    'florence italy': (43.7696, 11.2558),
+    'naples italy': (40.8518, 14.2681),
+    'venice italy': (45.4408, 12.3155),
+    'bologna italy': (44.4949, 11.3426),
+}
+
+
+def _correct_city(place, city):
+    """Require an actual location clue, not just Google's search query."""
+    destination = _destination_key(city)
+    addr = _normalized(str(place.get('address') or ''))
+    if destination in _CITY_CENTRES:
+        canonical = destination.split()[0]
+        aliases = _ITALIAN_CITY_ALIASES[canonical]
+        if any(re.search(r'\b' + re.escape(alias) + r'\b', addr) for alias in aliases):
+            return True
+        if canonical == 'turin' and re.search(r'\b101\d\d\b', addr):
+            return True
+        gps = place.get('gps_coordinates') or {}
+        if isinstance(gps, dict):
+            lat = _number(gps.get('latitude'), -90, 90)
+            lng = _number(gps.get('longitude'), -180, 180)
+            if lat is not None and lng is not None:
+                clat, clng = _CITY_CENTRES[destination]
+                # Approximate <25 km, wide enough for ordinary city hotels.
+                return abs(lat - clat) < .225 and abs(lng - clng) < .32
+        return False
+    # Conservative fallback for any other city: require its name in the address.
+    simple = _normalized(city)
+    if re.search(r'\b' + re.escape(simple) + r'\b', addr):
+        return True
+    if len(simple.split()) > 1:
+        short = ' '.join(simple.split()[:-1])
+        return bool(short and re.search(r'\b' + re.escape(short) + r'\b', addr))
+    return False
+
+
+def _exact_hotel_name(candidate, expected, city):
+    seen = _normalized(candidate)
+    want = _normalized(expected)
+    if seen == want:
+        return True
+    # Google sometimes adds the city to the official name, e.g. Hotel Eden Torino.
+    return any(seen == want + ' ' + alias
+               for alias in (city, *_ITALIAN_CITY_ALIASES.get(_destination_key(city).split()[0], ())))
+
+
+def _target_from_response(response, hotel, city):
+    """Select only a verifiable named property in the requested destination."""
+    candidates = []
+    if response.get('name') and not response.get('properties'):
+        candidates.append(response)
+    for section in ('properties', 'non_matching_properties'):
+        props = response.get(section) or []
+        if isinstance(props, list):
+            candidates.extend(p for p in props if isinstance(p, dict))
+    matching = [p for p in candidates
+                if _exact_hotel_name(p.get('name'), hotel, city) and _correct_city(p, city)]
+    if len(matching) != 1:
+        raise ValueError('Could not verify exactly one matching hotel in that city. '
+                         'Try the full official property name; nothing has been saved.')
+    return matching[0]
+
+
+def _save_target_property(destination, checkin, checkout, adults, budget, item):
+    """Store a named-property result WITHOUT changing previous citywide searches."""
+    when = dt.datetime.now(dt.timezone.utc).isoformat()
+    with _db_connect() as c:
+        cur = c.execute("""INSERT INTO hotel_checks
+            (searched_at, destination, destination_key, checkin, checkout,
+             adults, currency, budget, property_count, search_scope)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'property')""",
+            (when, _normalized(destination), _destination_key(destination),
+             checkin, checkout, adults, 'GBP', budget))
+        columns = ['check_id','property_key','hotel_name','property_type',
+                   'nightly_price','total_price','rating','address',
+                   'property_token','hotel_url','booking_sources', *EXTRA_COLUMNS]
+        sql = 'INSERT INTO hotel_prices (' + ','.join(columns) + ') VALUES (' + ','.join(':'+k for k in columns) + ')'
+        c.execute(sql, {'check_id':cur.lastrowid, **item})
+    return when
+
 def _snapshot(destination, checkin, checkout, adults, currency, budget, rows):
     with _db_connect() as c:
         prev = c.execute('''SELECT id, searched_at FROM hotel_checks
             WHERE destination_key=? AND checkin=? AND checkout=? AND adults=? AND currency=?
-            ORDER BY searched_at DESC, id DESC LIMIT 1''',
+            AND search_scope='city' ORDER BY searched_at DESC, id DESC LIMIT 1''',
             (_destination_key(destination), checkin, checkout, adults, currency)).fetchone()
         prev_rows = {}
         if prev:
@@ -468,7 +563,7 @@ def _look_up_hotel(query):
                          ORDER BY c.searched_at DESC, c.id DESC LIMIT 2000''').fetchall()
         matches = [dict(r) for r in rows if needle in _normalized(r['hotel_name'])]
         if not matches:
-            return None, 'No matching hotel in your saved searches. Try /hotels first.'
+            return None, 'Hotel is not saved yet. Use /hotelfind with its name, city, and dates (1 API request).'
         exact = [r for r in matches if _normalized(r['hotel_name']) == needle]
         if exact:
             selected = exact[0]
@@ -539,7 +634,8 @@ def _history_rows(city: str, checkin: str, checkout: str, adults: int = 1, curre
     with _db_connect() as c:
         rows = c.execute('''SELECT id, searched_at, property_count, destination
             FROM hotel_checks WHERE destination_key=? AND checkin=? AND checkout=?
-            AND adults=? AND currency=? ORDER BY searched_at DESC, id DESC LIMIT 100''',
+            AND adults=? AND currency=? AND search_scope='city'
+            ORDER BY searched_at DESC, id DESC LIMIT 100''',
             (_destination_key(city), checkin, checkout, adults, currency)).fetchall()
         return [dict(r) for r in rows]
 
@@ -1051,7 +1147,76 @@ def register_hotel_commands(tree: app_commands.CommandTree):
         await interaction.response.send_message('\n'.join(lines), ephemeral=True)
 
 
-    @tree.command(name='hoteloffers', description='Check actual room types and provider quotes for ONE saved hotel (1 API credit)', guild=guild)
+    @tree.command(name='hotelfind', description='Find a named hotel missing from city results (1 SerpApi search)', guild=guild)
+    @app_commands.describe(hotel='Exact hotel name, e.g. Hotel Eden', city='City, e.g. Turin Italy',
+                           checkin='YYYY-MM-DD', checkout='YYYY-MM-DD',
+                           budget='Total trip budget in GBP', adults='Guest count')
+    async def hotelfind(interaction: discord.Interaction, hotel: str, city: str,
+                        checkin: str, checkout: str, budget: float = 120.0, adults: int = 1):
+        if str(interaction.user.id) != OWNER_ID:
+            return await interaction.response.send_message('This is a private command.', ephemeral=True)
+        try:
+            nights = _night_count(checkin, checkout)
+            if not hotel.strip() or len(hotel) > 100 or not city.strip() or len(city) > 100:
+                raise ValueError('Enter a hotel name and its city.')
+            if not 1 <= adults <= 8 or not 0 < budget <= 10_000:
+                raise ValueError('Guests must be 1–8 and budget £1–£10,000.')
+        except ValueError as exc:
+            return await interaction.response.send_message('⚠️ '+_safe(str(exc), 200), ephemeral=True)
+        if not SERPAPI_KEY:
+            return await interaction.response.send_message('SERPAPI_API_KEY is missing.', ephemeral=True)
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        params = dict(engine='google_hotels', q=f'{hotel.strip()} in {city.strip()}',
+                      check_in_date=checkin, check_out_date=checkout,
+                      adults=adults, children=0, currency='GBP', gl='uk', hl='en',
+                      api_key=SERPAPI_KEY, output='json')
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=75)) as session:
+                async with session.get(SERPAPI_URL, params=params) as resp:
+                    data = await resp.json(content_type=None)
+                    if resp.status != 200 or not isinstance(data, dict) or data.get('error'):
+                        raise RuntimeError(f'SerpApi HTTP {resp.status}; check quota or try again.')
+            place = _target_from_response(data, hotel.strip(), city.strip())
+            item = _row(place)
+            if nights == 1 and item['total_price'] is None:
+                item['total_price'] = item['nightly_price']
+            # Save even if Google doesn't return a rate, since token is useful for
+            # a later room-specific check. Do not infer availability from omission.
+            if not item['property_token']:
+                raise ValueError('Google did not return a hotel property token; nothing saved.')
+            when = await asyncio.to_thread(_save_target_property,
+                                           city.strip(), checkin, checkout, adults, budget, item)
+            header = discord.Embed(title='🔎 Specific hotel · ' + item['hotel_name'][:170],
+                description=(f'**{checkin} → {checkout} · {adults} adult(s)**\n'
+                             f'**Headline price:** {_money(item["total_price"])}\n'
+                             f'**Checked:** {_stamp(when)}\n'
+                             '**Not a confirmed private room or final checkout rate.**'))
+            header.add_field(name='📍 Location', value=_safe(item['address'], 160) or 'Verified by coordinates', inline=False)
+            header.add_field(name='🔗 Google Hotels',
+                             value='[View property](' + _property_link(item, city.strip()) + ')', inline=False)
+            raw_offers = _offer_rows(place)
+            response_embeds = [header]
+            if raw_offers:
+                selected = {**item, 'checkin':checkin, 'checkout':checkout,
+                            'adults':adults, 'destination':_normalized(city),
+                            'destination_key':_destination_key(city), 'currency':'GBP'}
+                checked, previous, older = await asyncio.to_thread(_save_room_offers, selected, raw_offers)
+                response_embeds += _offer_embeds(selected, raw_offers, checked, previous, older, budget)
+                header.add_field(name='🛏️ Room-level offers',
+                                 value=f'{len(raw_offers)} named rates also saved from this same request.', inline=False)
+            else:
+                header.add_field(name='Next step', value=(
+                    'Hotel saved! Google did not include named room rates in this response. '
+                    'Use `/hoteloffers` for this hotel (1 additional API request).'), inline=False)
+            header.set_footer(text='Specific-hotel lookup: 1 SerpApi request. Full-city price-history comparisons remain separate.')
+            for batch in _group_embeds_for_discord(response_embeds):
+                await interaction.followup.send(embeds=batch, ephemeral=True,
+                                                allowed_mentions=discord.AllowedMentions.none())
+        except (ValueError, RuntimeError, aiohttp.ClientError, asyncio.TimeoutError,
+                sqlite3.Error, OSError, discord.HTTPException) as exc:
+            await interaction.followup.send('⚠️ Specific hotel lookup: '+_safe(str(exc), 260), ephemeral=True)
+
+    @tree.command(name='hoteloffers', description='Inspect room offers for a saved hotel (1 API credit)', guild=guild)
     @app_commands.describe(hotel='Hotel from your saved searches', budget='Total stay budget in GBP')
     async def hoteloffers(interaction: discord.Interaction, hotel: str, budget: float = 120.0):
         if str(interaction.user.id) != OWNER_ID:
