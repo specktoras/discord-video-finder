@@ -1,5 +1,8 @@
 """Private, on-demand Google Hotels results and SQLite price history for discord.py.
 
+V2.1: clean clickable links in embed VALUES (Discord does not parse links in
+embed FIELD NAMES); add /hotelstatus to diagnose persistent data storage.
+
 Integration: register_hotel_commands(tree) once before tree.sync().
 No timers or background hotel-price polling. /hotels uses ONE SerpApi request.
 /hoteldetails and /hotelhistory are offline database reads (ZERO SerpApi credits).
@@ -254,37 +257,74 @@ def _safe(s, length=120):
     return discord.utils.escape_markdown(str(s or '')[:length]).replace('`', '')
 
 
+def _previous_price(row, older):
+    """Match by stable token, falling back to unambiguous hotel name.
+
+    Property tokens can change between source responses; never compare across
+    hotels with the same common name unless the stored name is unique.
+    """
+    direct = older.get(row['property_key'])
+    if direct is not None:
+        return direct
+    name = _normalized(row.get('hotel_name'))
+    hits = [r for r in older.values() if _normalized(r.get('hotel_name')) == name]
+    return hits[0] if name and len(hits) == 1 else None
+
+
 def _search_embeds(city, checkin, checkout, nights, adults, budget, rows, previous, older, searched_at):
-    """Discord embeds allow details for every returned property (no 1,950-char truncation)."""
+    """Clean hotel list. Discord field NAMES do not render masked links.
+
+    Put clickable Markdown links only in embed descriptions / field VALUES.
+    This also keeps long Google entity URLs out of the visible hotel titles.
+    """
     within = [r for r in rows if r['total_price'] is not None and r['total_price'] <= budget]
     within.sort(key=lambda r: r['total_price'])
-    heading = discord.Embed(title='🏨 Google Hotels · ' + city[:80],
-        description=(f'**{checkin} → {checkout}** · {nights} night(s) · {adults} adult(s)\n'
-                     f'**{len(rows)} priced properties** · **{len(within)} within {_money(budget)}**\n'
-                     f'**Current check:** {_stamp(searched_at)}\n'
-                     f'**Previous check:** {_stamp(previous["searched_at"]) if previous else "none — first check"}\n\n'
-                     '⚠️ **Quoted prices do not verify a private room.** Confirm room category, fees and cancellation on the booking site.'))
-    heading.add_field(name='Search', value=f'[Open all results on Google Hotels]({_google_link(city,checkin,checkout,adults)})', inline=False)
+    heading = discord.Embed(
+        title='🏨 Google Hotels · ' + city[:80],
+        description=(
+            f'**{checkin} → {checkout}** · {nights} night(s) · {adults} adult(s)\n'
+            f'**{len(rows)} priced properties** · **{len(within)} within {_money(budget)}**\n'
+            f'**Checked:** {_stamp(searched_at)}\n'
+            f'**Compared with:** {_stamp(previous["searched_at"]) if previous else "No previous snapshot found"}\n\n'
+            '⚠️ **Headline prices do not prove a private room.** Confirm sleeping arrangements, taxes and cancellation before booking.'
+        )
+    )
+    heading.add_field(
+        name='Search all hotels',
+        value=f'[Open Google Hotels for these dates]({_google_link(city, checkin, checkout, adults)})',
+        inline=False,
+    )
     if not within:
-        heading.add_field(name='No matches in budget', value='Try a larger budget or another area.', inline=False)
+        heading.add_field(name='No matches under budget', value='Try a larger budget or another area.', inline=False)
     pages = [heading]
-    # 8 fields/page keeps mobile results readable and the embed under Discord limits.
-    for off in range(0, len(within), 8):
-        embed = discord.Embed(title=f'🏨 Properties {off + 1}–{min(off + 8, len(within))} of {len(within)}')
-        for idx, row in enumerate(within[off:off+8], off+1):
-            name = _safe(row['hotel_name'], 85)
-            url = _property_link(row, city)
-            change = _comparison(row, older.get(row['property_key']))
-            rating = f'⭐ {row["rating"]:.1f}/5' if row.get('rating') is not None else '⭐ Not listed'
+    # Six short, readable hotel entries per embed — much easier on phones.
+    for off in range(0, len(within), 6):
+        embed = discord.Embed(title=f'🏨 Properties {off + 1}–{min(off + 6, len(within))} of {len(within)}')
+        for idx, row in enumerate(within[off:off + 6], off + 1):
+            name = _safe(row['hotel_name'], 90)
+            current_price = _money(row['total_price'])
+            change = _comparison(row, _previous_price(row, older))
+            hotel_url = _property_link(row, city)
+            map_url = _map_link(row)
+            rating = f'⭐ {row["rating"]:.1f}/5' if row.get('rating') is not None else ''
+            reviews = f' ({row["review_count"]:,} reviews)' if row.get('review_count') is not None and rating else ''
             amenities = _json_strings(row.get('amenities_json'))
-            amenity_line = ' · '.join(_safe(x, 35) for x in amenities[:3]) if amenities else 'Not listed'
-            place = _safe(row.get('address'), 65) if row.get('address') else 'View map'
-            value = f'📍 [{place}]({_map_link(row)}) · {rating}\n🏷️ {amenity_line}'
-            embed.add_field(name=f'{idx}. [{name}]({url}) — {_money(row["total_price"])} · {change}', value=value[:1024], inline=False)
-        embed.set_footer(text='Tap a hotel name to open its Google Hotels page. Dates may need reselecting. /hoteldetails for more.')
+            amenity_line = ' · '.join(_safe(x, 32) for x in amenities[:3]) if amenities else ''
+            info = [f'🔗 [Google Hotels]({hotel_url}) · [Map]({map_url})']
+            if rating:
+                info.append(rating + reviews)
+            if row.get('address'):
+                info.append('📍 ' + _safe(row['address'], 100))
+            if amenity_line:
+                info.append('🧳 ' + amenity_line)
+            embed.add_field(
+                name=f'{idx}. {name} — {current_price} · {change}',
+                value='\n'.join(info)[:1024],
+                inline=False,
+            )
+        embed.set_footer(text='Hotel links open Google Hotels. Room type not verified. /hoteldetails shows saved details.')
         pages.append(embed)
     return pages
-
 
 def _group_embeds_for_discord(embeds, max_chars=5000):
     """Discord caps the COMBINED text of all embeds on one message at 6000.
@@ -333,8 +373,10 @@ def _look_up_hotel(query):
               selected['adults'], selected['currency'], selected['history_check_id'])).fetchone()
         old = None
         if older_check:
-            old = c.execute('''SELECT * FROM hotel_prices WHERE check_id=? AND property_key=?''',
-                            (older_check['id'], selected['property_key'])).fetchone()
+            prior_rows = [dict(r) for r in c.execute(
+                'SELECT * FROM hotel_prices WHERE check_id=?', (older_check['id'],))]
+            prior = {r['property_key']: r for r in prior_rows}
+            old = _previous_price(selected, prior)
     return (selected, dict(old) if old else None, dict(older_check) if older_check else None), None
 
 
@@ -367,7 +409,7 @@ def _detail_embed(row, older, previous):
         embed.add_field(name='Listing summary', value=', '.join(_safe(x, 60) for x in essentials[:6])[:450], inline=False)
     links = f'[Google Hotels property]({_property_link(row, row["destination"])}) · [Map]({_map_link(row)})'
     if row.get('hotel_url'):
-        links += f' · [Official website]({row["hotel_url"]})'
+        links += f' · [Source listing]({row["hotel_url"]})'
     embed.add_field(name='🔗 Links', value=links, inline=False)
     embed.add_field(name='🛏️ Private room?',
         value='**Not verified for this advertised rate.** Check that the selected booking option is a private room or entire unit for one guest. Also check taxes and cancellation. Google Hotels may ask you to select the dates again.', inline=False)
@@ -376,6 +418,51 @@ def _detail_embed(row, older, previous):
     else:
         embed.set_footer(text='Stored search data. /hoteldetails itself makes NO API request.')
     return embed
+
+
+
+def _database_status():
+    """Read-only diagnostics. Never calls SerpApi; helpful after deployment."""
+    c = _db_connect()
+    try:
+        total_checks = c.execute('SELECT COUNT(*) FROM hotel_checks').fetchone()[0]
+        total_prices = c.execute('SELECT COUNT(*) FROM hotel_prices').fetchone()[0]
+        recent = c.execute("""SELECT id,searched_at,destination,checkin,checkout,adults,property_count
+            FROM hotel_checks ORDER BY id DESC LIMIT 6""").fetchall()
+        resolved_path = str(Path(DB_PATH).resolve())
+        filesize = Path(DB_PATH).stat().st_size if Path(DB_PATH).exists() else 0
+        return {
+            'path': resolved_path,
+            'size': filesize,
+            'checks': total_checks,
+            'quotes': total_prices,
+            'recent': [dict(r) for r in recent],
+        }
+    finally:
+        c.close()
+
+
+def _status_embed(status):
+    e = discord.Embed(
+        title='🗄️ Hotel database status',
+        description=(f'**Saved searches:** {status["checks"]}\n'
+                     f'**Saved hotel quotes:** {status["quotes"]}\n'
+                     f'**Database size:** {status["size"]:,} bytes\n'
+                     f'**Database location:** `{status["path"][:250]}`\n\n'
+                     'ℹ️ Uses **zero** SerpApi credits.')
+    )
+    recent = status['recent']
+    if recent:
+        value = '\n'.join(
+            f'• {_stamp(x["searched_at"])} — {_safe(x["destination"], 40)} '
+            f'({x["checkin"]} → {x["checkout"]}, {x["adults"]} guest(s))'
+            for x in recent
+        )
+        e.add_field(name='Most recent saved checks', value=value[:1024], inline=False)
+    else:
+        e.add_field(name='Most recent saved checks', value='No saved hotel price snapshots.', inline=False)
+    e.set_footer(text='If searches from before a redeploy are missing, check FadeHost persistent storage / HOTEL_DB_PATH.')
+    return e
 
 
 def register_hotel_commands(tree: app_commands.CommandTree):
@@ -451,6 +538,19 @@ def register_hotel_commands(tree: app_commands.CommandTree):
         hotels = list(dict.fromkeys(r['hotel_name'] for r in rows))
         matches = [h for h in hotels if _normalized(current) in _normalized(h)]
         return [app_commands.Choice(name=h[:100], value=h[:100]) for h in matches[:25]]
+
+    @tree.command(name='hotelstatus', description='Check saved hotel data and storage path; uses zero API credits', guild=guild)
+    async def hotelstatus(interaction: discord.Interaction):
+        if str(interaction.user.id) != OWNER_ID:
+            return await interaction.response.send_message('This is a private command.', ephemeral=True)
+        try:
+            status = await asyncio.to_thread(_database_status)
+            await interaction.response.send_message(
+                embed=_status_embed(status), ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none())
+        except (sqlite3.Error, OSError) as exc:
+            await interaction.response.send_message(
+                f'⚠️ Could not inspect the hotel database: {type(exc).__name__}', ephemeral=True)
 
     @tree.command(name='hotelhistory', description='List saved checks for a trip without API usage', guild=guild)
     @app_commands.describe(city='Same city as the search', checkin='YYYY-MM-DD',
