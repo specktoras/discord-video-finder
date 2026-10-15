@@ -1,15 +1,21 @@
-"""Add on-demand Google Hotels searching + SQLite price history to an existing discord.py CommandTree.
-Call register_hotel_commands(tree) before tree.sync().
+"""Private, on-demand Google Hotels results and SQLite price history for discord.py.
+
+Integration: register_hotel_commands(tree) once before tree.sync().
+No timers or background hotel-price polling. /hotels uses ONE SerpApi request.
+/hoteldetails and /hotelhistory are offline database reads (ZERO SerpApi credits).
 """
 from __future__ import annotations
+
 import asyncio
 import datetime as dt
+import json
 import os
 import re
 import sqlite3
 import unicodedata
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode, urlparse
+from zoneinfo import ZoneInfo
 
 import aiohttp
 import discord
@@ -18,9 +24,21 @@ from discord import app_commands
 SERPAPI_URL = 'https://serpapi.com/search.json'
 DB_PATH = os.getenv('HOTEL_DB_PATH', '/data/storage/hotels.sqlite3')
 SERPAPI_KEY = os.getenv('SERPAPI_API_KEY', '')
-OWNER_ID = os.environ['OWNER_ID']
+OWNER_ID = str(os.environ['OWNER_ID'])
 GUILD_ID = int(os.environ['GUILD_ID'])
-PAGE_LIMIT = 1  # one API request per command; never background polling
+UK = ZoneInfo('Europe/London')
+
+# Added to EXISTING hotel_prices; existing snapshots and data are preserved.
+EXTRA_COLUMNS = {
+    'lat': 'REAL',
+    'lng': 'REAL',
+    'amenities_json': 'TEXT',
+    'description': 'TEXT',
+    'review_count': 'INTEGER',
+    'checkin_time': 'TEXT',
+    'checkout_time': 'TEXT',
+    'essential_info_json': 'TEXT',
+}
 
 
 def _db_connect():
@@ -57,8 +75,13 @@ def _db_connect():
         );
         CREATE INDEX IF NOT EXISTS idx_checks_trip ON hotel_checks
             (destination, checkin, checkout, adults, currency, id);
-        CREATE INDEX IF NOT EXISTS idx_prices_key ON hotel_prices (check_id, property_key);
+        CREATE INDEX IF NOT EXISTS idx_prices_key ON hotel_prices(check_id, property_key);
     ''')
+    current = {r['name'] for r in con.execute('PRAGMA table_info(hotel_prices)')}
+    for name, dtype in EXTRA_COLUMNS.items():
+        if name not in current:
+            con.execute(f'ALTER TABLE hotel_prices ADD COLUMN {name} {dtype}')
+    con.commit()
     return con
 
 
@@ -72,63 +95,124 @@ def _price(obj):
         return None
     for key in ('extracted_lowest', 'extracted_price'):
         v = obj.get(key)
-        if isinstance(v, (float, int)) and v > 0:
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and 0 < v < 1_000_000:
             return round(float(v), 2)
     return None
 
 
+def _number(v, minimum=None, maximum=None):
+    try:
+        f = float(v)
+        if f != f or f in (float('inf'), float('-inf')):
+            return None
+        if minimum is not None and f < minimum:
+            return None
+        if maximum is not None and f > maximum:
+            return None
+        return f
+    except (ValueError, TypeError):
+        return None
+
+
+def _url_or_empty(value):
+    if not isinstance(value, str):
+        return ''
+    u = urlparse(value)
+    return value if u.scheme in ('https', 'http') and u.netloc else ''
+
+
+def _clean_strings(values, maximum=20):
+    if not isinstance(values, list):
+        return []
+    return [str(v).strip()[:90] for v in values[:maximum]
+            if isinstance(v, str) and v.strip()]
+
+
 def _row(p):
-    price = _price(p.get('rate_per_night'))
+    nightly = _price(p.get('rate_per_night'))
     total = _price(p.get('total_rate'))
-    # Do not guess trip totals for multi-night stays.
-    if total is None:
-        total = None
-    name = str(p.get('name') or 'Unnamed property')
+    name = str(p.get('name') or 'Unnamed property')[:200]
+    address = str(p.get('address') or '')[:300]
+    token = str(p.get('property_token') or '')[:300]
     gps = p.get('gps_coordinates') or {}
-    address = str(p.get('address') or '')
-    token = p.get('property_token') or ''
-    # Hotel identity: token where present, fallback to normalized name + place.
-    identity = ('token:' + str(token)) if token else 'name:' + _normalized(name) + ':' + _normalized(address)
-    sources = ', '.join(str(x.get('source')) for x in (p.get('prices') or []) if isinstance(x, dict) and x.get('source'))[:200]
-    rating = p.get('overall_rating') or p.get('rating')
-    try: rating = float(rating)
-    except (ValueError, TypeError): rating = None
-    return dict(property_key=identity, hotel_name=name, property_type=p.get('type') or '',
-                nightly_price=price, total_price=total, rating=rating, address=address,
-                property_token=str(token), hotel_url=str(p.get('link') or ''), booking_sources=sources)
+    if not isinstance(gps, dict):
+        gps = {}
+    lat = _number(gps.get('latitude'), -90, 90)
+    lng = _number(gps.get('longitude'), -180, 180)
+    rating = _number(p.get('overall_rating') if p.get('overall_rating') is not None
+                     else p.get('rating'), 0, 5)
+    reviews = _number(p.get('reviews'), 0, 100_000_000)
+    amenities = _clean_strings(p.get('amenities'))
+    essentials = _clean_strings(p.get('essential_info'), 10)
+    sources = ', '.join(str(x.get('source')) for x in (p.get('prices') or [])
+                        if isinstance(x, dict) and x.get('source'))[:200]
+    identity = 'token:' + token if token else 'name:' + _normalized(name) + ':' + _normalized(address)
+    return dict(property_key=identity, hotel_name=name, property_type=str(p.get('type') or '')[:70],
+                nightly_price=nightly, total_price=total, rating=rating, address=address,
+                property_token=token, hotel_url=_url_or_empty(p.get('link')),
+                booking_sources=sources, lat=lat, lng=lng,
+                amenities_json=json.dumps(amenities, ensure_ascii=False),
+                essential_info_json=json.dumps(essentials, ensure_ascii=False),
+                description=str(p.get('description') or '')[:450],
+                review_count=int(reviews) if reviews is not None else None,
+                checkin_time=str(p.get('check_in_time') or '')[:40],
+                checkout_time=str(p.get('check_out_time') or '')[:40])
 
 
 def _snapshot(destination, checkin, checkout, adults, currency, budget, rows):
     with _db_connect() as c:
-        prev = c.execute('''SELECT id FROM hotel_checks WHERE destination=? AND checkin=? AND checkout=?
-            AND adults=? AND currency=? ORDER BY id DESC LIMIT 1''',
+        prev = c.execute('''SELECT id, searched_at FROM hotel_checks
+            WHERE destination=? AND checkin=? AND checkout=? AND adults=? AND currency=?
+            ORDER BY id DESC LIMIT 1''',
             (_normalized(destination), checkin, checkout, adults, currency)).fetchone()
         prev_rows = {}
         if prev:
             for r in c.execute('SELECT * FROM hotel_prices WHERE check_id=?', (prev['id'],)):
                 prev_rows[r['property_key']] = dict(r)
         now = dt.datetime.now(dt.timezone.utc).isoformat()
-        cur = c.execute('''INSERT INTO hotel_checks(searched_at,destination,checkin,checkout,adults,currency,budget,property_count)
-            VALUES (?,?,?,?,?,?,?,?)''', (now, _normalized(destination), checkin, checkout, adults, currency, budget, len(rows)))
-        check_id = cur.lastrowid
+        cur = c.execute('''INSERT INTO hotel_checks
+            (searched_at,destination,checkin,checkout,adults,currency,budget,property_count)
+            VALUES (?,?,?,?,?,?,?,?)''',
+            (now, _normalized(destination), checkin, checkout, adults, currency, budget, len(rows)))
+        columns = ['check_id', 'property_key', 'hotel_name', 'property_type',
+                   'nightly_price', 'total_price', 'rating', 'address',
+                   'property_token', 'hotel_url', 'booking_sources', *EXTRA_COLUMNS]
+        sql = 'INSERT INTO hotel_prices(' + ','.join(columns) + ') VALUES (' + ','.join(':' + k for k in columns) + ')'
         for r in rows:
-            c.execute('''INSERT INTO hotel_prices(check_id,property_key,hotel_name,property_type,nightly_price,total_price,rating,address,property_token,hotel_url,booking_sources)
-                VALUES(:check_id,:property_key,:hotel_name,:property_type,:nightly_price,:total_price,:rating,:address,:property_token,:hotel_url,:booking_sources)''', {'check_id':check_id, **r})
-    return check_id, prev_rows
+            c.execute(sql, {'check_id': cur.lastrowid, **r})
+    return dict(prev) if prev else None, prev_rows, now
 
 
-def _night_count(a,b):
-    start,end=dt.date.fromisoformat(a),dt.date.fromisoformat(b)
-    n=(end-start).days
-    if n < 1 or n > 30: raise ValueError('Check-out must be 1–30 days after check-in.')
-    if start < dt.date.today(): raise ValueError('Check-in cannot be in the past.')
-    return n
+def _night_count(a, b):
+    start, end = dt.date.fromisoformat(a), dt.date.fromisoformat(b)
+    nights = (end-start).days
+    if not 1 <= nights <= 30:
+        raise ValueError('Check-out must be 1–30 days after check-in.')
+    if start < dt.datetime.now(UK).date():
+        raise ValueError('Check-in cannot be in the past.')
+    return nights
 
 
-def _google_link(city,checkin,checkout,adults):
-    # Google Hotels landing page: users can verify the actual private-room offer.
-    q=f'hotels in {city} {checkin} to {checkout} {adults} adult'
-    return 'https://www.google.com/travel/hotels?' + urlencode({'q':q})
+def _google_link(city, checkin, checkout, adults):
+    q = f'hotels in {city} {checkin} to {checkout} {adults} adult'
+    return 'https://www.google.com/travel/hotels?' + urlencode({'q': q})
+
+
+def _property_link(row, city):
+    """Real Google Hotels entity link when Google returned a property_token.
+
+    The browser may still need dates reselected; never promise a bookable offer.
+    """
+    token = row.get('property_token') or ''
+    if token and len(token) < 300:
+        return 'https://www.google.com/travel/hotels/entity/' + quote(token, safe='')
+    return 'https://www.google.com/travel/hotels?' + urlencode({'q': str(row.get('hotel_name') or '') + ' ' + city})
+
+
+def _map_link(row):
+    if row.get('lat') is not None and row.get('lng') is not None:
+        return 'https://www.google.com/maps/search/?' + urlencode({'api': '1', 'query': f'{row["lat"]},{row["lng"]}'})
+    return 'https://www.google.com/maps/search/?' + urlencode({'api': '1', 'query': str(row.get('hotel_name') or '') + ' ' + str(row.get('address') or '')})
 
 
 def _money(v):
@@ -136,82 +220,257 @@ def _money(v):
 
 
 def _comparison(current, older):
-    if not older or older.get('total_price') is None or current.get('total_price') is None:
-        return 'new' if not older else 'n/a'
-    d=round(current['total_price']-older['total_price'], 2)
-    if abs(d)<0.01: return 'same'
-    return (f'↓ £{-d:.2f}' if d<0 else f'↑ £{d:.2f}')
+    if not older:
+        return '🆕 new'
+    if older.get('total_price') is None or current.get('total_price') is None:
+        return 'not comparable'
+    delta = round(current['total_price'] - older['total_price'], 2)
+    if abs(delta) < .01:
+        return '＝ same'
+    return f'📉 ↓ {_money(-delta)}' if delta < 0 else f'📈 ↑ {_money(delta)}'
+
+
+def _stamp(iso):
+    if not iso:
+        return 'unknown time'
+    try:
+        date = dt.datetime.fromisoformat(iso.replace('Z', '+00:00'))
+        if date.tzinfo is None:
+            date = date.replace(tzinfo=dt.timezone.utc)
+        return date.astimezone(UK).strftime('%d %b %Y, %H:%M UK')
+    except ValueError:
+        return 'unknown time'
+
+
+def _json_strings(text):
+    try:
+        data = json.loads(text or '[]')
+        return data if isinstance(data, list) else []
+    except (TypeError, json.JSONDecodeError):
+        return []
+
+
+def _safe(s, length=120):
+    return discord.utils.escape_markdown(str(s or '')[:length]).replace('`', '')
+
+
+def _search_embeds(city, checkin, checkout, nights, adults, budget, rows, previous, older, searched_at):
+    """Discord embeds allow details for every returned property (no 1,950-char truncation)."""
+    within = [r for r in rows if r['total_price'] is not None and r['total_price'] <= budget]
+    within.sort(key=lambda r: r['total_price'])
+    heading = discord.Embed(title='🏨 Google Hotels · ' + city[:80],
+        description=(f'**{checkin} → {checkout}** · {nights} night(s) · {adults} adult(s)\n'
+                     f'**{len(rows)} priced properties** · **{len(within)} within {_money(budget)}**\n'
+                     f'**Current check:** {_stamp(searched_at)}\n'
+                     f'**Previous check:** {_stamp(previous["searched_at"]) if previous else "none — first check"}\n\n'
+                     '⚠️ **Quoted prices do not verify a private room.** Confirm room category, fees and cancellation on the booking site.'))
+    heading.add_field(name='Search', value=f'[Open all results on Google Hotels]({_google_link(city,checkin,checkout,adults)})', inline=False)
+    if not within:
+        heading.add_field(name='No matches in budget', value='Try a larger budget or another area.', inline=False)
+    pages = [heading]
+    # 8 fields/page keeps mobile results readable and the embed under Discord limits.
+    for off in range(0, len(within), 8):
+        embed = discord.Embed(title=f'🏨 Properties {off + 1}–{min(off + 8, len(within))} of {len(within)}')
+        for idx, row in enumerate(within[off:off+8], off+1):
+            name = _safe(row['hotel_name'], 85)
+            url = _property_link(row, city)
+            change = _comparison(row, older.get(row['property_key']))
+            rating = f'⭐ {row["rating"]:.1f}/5' if row.get('rating') is not None else '⭐ Not listed'
+            amenities = _json_strings(row.get('amenities_json'))
+            amenity_line = ' · '.join(_safe(x, 35) for x in amenities[:3]) if amenities else 'Not listed'
+            place = _safe(row.get('address'), 65) if row.get('address') else 'View map'
+            value = f'📍 [{place}]({_map_link(row)}) · {rating}\n🏷️ {amenity_line}'
+            embed.add_field(name=f'{idx}. [{name}]({url}) — {_money(row["total_price"])} · {change}', value=value[:1024], inline=False)
+        embed.set_footer(text='Tap a hotel name to open its Google Hotels page. Dates may need reselecting. /hoteldetails for more.')
+        pages.append(embed)
+    return pages
+
+
+def _group_embeds_for_discord(embeds, max_chars=5000):
+    """Discord caps the COMBINED text of all embeds on one message at 6000.
+
+    Send separate ephemeral followups for larger result sets, never silently crop.
+    """
+    groups, batch, count = [], [], 0
+    for e in embeds:
+        size = len(e.title or '') + len(e.description or '') + len(e.footer.text or '')
+        size += sum(len(f.name) + len(f.value) for f in e.fields)
+        if batch and (len(batch) >= 10 or count + size > max_chars):
+            groups.append(batch)
+            batch, count = [], 0
+        batch.append(e)
+        count += size
+    if batch:
+        groups.append(batch)
+    return groups
+
+
+def _look_up_hotel(query):
+    needle = _normalized(query)
+    if not needle:
+        return None, 'Please enter a hotel name.'
+    with _db_connect() as c:
+        rows = c.execute('''SELECT p.*, c.searched_at, c.destination, c.checkin,
+                         c.checkout, c.adults, c.currency, c.id AS history_check_id
+                         FROM hotel_prices p
+                         JOIN hotel_checks c ON p.check_id=c.id
+                         ORDER BY c.id DESC LIMIT 2000''').fetchall()
+        matches = [dict(r) for r in rows if needle in _normalized(r['hotel_name'])]
+        if not matches:
+            return None, 'No matching hotel in your saved searches. Try /hotels first.'
+        exact = [r for r in matches if _normalized(r['hotel_name']) == needle]
+        if exact:
+            selected = exact[0]
+        else:
+            distinct = list(dict.fromkeys(r['hotel_name'] for r in matches))
+            if len(distinct) > 1:
+                return None, 'Several hotels match. Please use a more specific name: ' + ', '.join(distinct[:6])
+            selected = matches[0]
+        older_check = c.execute('''SELECT id, searched_at FROM hotel_checks WHERE destination=?
+             AND checkin=? AND checkout=? AND adults=? AND currency=? AND id<?
+             ORDER BY id DESC LIMIT 1''',
+             (selected['destination'], selected['checkin'], selected['checkout'],
+              selected['adults'], selected['currency'], selected['history_check_id'])).fetchone()
+        old = None
+        if older_check:
+            old = c.execute('''SELECT * FROM hotel_prices WHERE check_id=? AND property_key=?''',
+                            (older_check['id'], selected['property_key'])).fetchone()
+    return (selected, dict(old) if old else None, dict(older_check) if older_check else None), None
+
+
+def _detail_embed(row, older, previous):
+    title = str(row['hotel_name'])[:180]
+    when = f'{row["checkin"]} → {row["checkout"]} · {row["adults"]} adult(s) · {row["destination"].title()}'
+    embed = discord.Embed(title='🏨 ' + title, description=when)
+    embed.add_field(name='💷 Google Hotels property quote', value=_money(row['total_price']), inline=True)
+    embed.add_field(name='📊 Since previous check', value=_comparison(row, older), inline=True)
+    embed.add_field(name='🕒 Last checked', value=_stamp(row['searched_at']), inline=False)
+    if previous:
+        prev_price = _money(older['total_price']) if older else 'Not listed in previous results'
+        embed.add_field(name='Previous snapshot', value=f'{prev_price} · {_stamp(previous["searched_at"])}', inline=False)
+    rating = f'{row["rating"]:.1f}/5' if row.get('rating') is not None else 'Not supplied'
+    if row.get('review_count') is not None:
+        rating += f' · {row["review_count"]:,} reviews'
+    embed.add_field(name='⭐ Google guest rating', value=rating, inline=True)
+    embed.add_field(name='🏠 Property category', value=_safe(row.get('property_type') or 'Not supplied', 80), inline=True)
+    embed.add_field(name='📍 Location', value=f'{_safe(row["address"], 210) + chr(10) if row.get("address") else ""}[Open in Maps]({_map_link(row)})', inline=False)
+    if row.get('description'):
+        embed.add_field(name='About', value=_safe(row['description'], 360), inline=False)
+    amenities = _json_strings(row.get('amenities_json'))
+    embed.add_field(name='🧳 Listed amenities', value=', '.join(_safe(x, 55) for x in amenities[:10])[:950] if amenities else 'Not supplied in the search response.', inline=False)
+    times = ' · '.join(x for x in [f'Check-in: {_safe(row["checkin_time"], 30)}' if row.get('checkin_time') else '',
+                                 f'Check-out: {_safe(row["checkout_time"], 30)}' if row.get('checkout_time') else ''] if x)
+    if times:
+        embed.add_field(name='🕓 Property check-in/out times', value=times, inline=False)
+    essentials = _json_strings(row.get('essential_info_json'))
+    if essentials:
+        embed.add_field(name='Listing summary', value=', '.join(_safe(x, 60) for x in essentials[:6])[:450], inline=False)
+    links = f'[Google Hotels property]({_property_link(row, row["destination"])}) · [Map]({_map_link(row)})'
+    if row.get('hotel_url'):
+        links += f' · [Official website]({row["hotel_url"]})'
+    embed.add_field(name='🔗 Links', value=links, inline=False)
+    embed.add_field(name='🛏️ Private room?',
+        value='**Not verified for this advertised rate.** Check that the selected booking option is a private room or entire unit for one guest. Also check taxes and cancellation. Google Hotels may ask you to select the dates again.', inline=False)
+    if row.get('amenities_json') is None:
+        embed.set_footer(text='Older snapshot: run /hotels again to collect rating, amenities and location details.')
+    else:
+        embed.set_footer(text='Stored search data. /hoteldetails itself makes NO API request.')
+    return embed
 
 
 def register_hotel_commands(tree: app_commands.CommandTree):
-    """Run once, before the existing bot calls tree.sync()."""
-    @tree.command(name='hotels', description='Search Google Hotels on demand and compare with the previous check', guild=discord.Object(id=GUILD_ID))
-    @app_commands.describe(city='City, e.g. Turin Italy', checkin='YYYY-MM-DD', checkout='YYYY-MM-DD', budget='Maximum total trip cost in GBP', adults='Number of adults (default 1)')
-    async def hotels(interaction: discord.Interaction, city: str, checkin: str, checkout: str, budget: float = 120.0, adults: int = 1):
-        if OWNER_ID and str(interaction.user.id) != OWNER_ID:
+    """Register once, before the existing bot calls tree.sync()."""
+    guild = discord.Object(id=GUILD_ID)
+
+    @tree.command(name='hotels', description='Search Google Hotels on demand; show details and price changes', guild=guild)
+    @app_commands.describe(city='City, e.g. Turin Italy', checkin='YYYY-MM-DD', checkout='YYYY-MM-DD',
+                           budget='Maximum total trip cost in GBP', adults='Number of adults (default 1)')
+    async def hotels(interaction: discord.Interaction, city: str, checkin: str, checkout: str,
+                     budget: float = 120.0, adults: int = 1):
+        if str(interaction.user.id) != OWNER_ID:
             return await interaction.response.send_message('This is a private command.', ephemeral=True)
         try:
             nights = _night_count(checkin, checkout)
-            if not city.strip() or len(city)>100 or adults<1 or adults>8 or budget<=0 or budget>10000:
+            if not city.strip() or len(city) > 100 or not 1 <= adults <= 8 or not 0 < budget <= 10_000:
                 raise ValueError('Invalid city, guest count (1–8), or budget.')
         except ValueError as e:
-            return await interaction.response.send_message(f'⚠️ {e} Use YYYY-MM-DD.',ephemeral=True)
+            return await interaction.response.send_message(f'⚠️ {e} Use YYYY-MM-DD.', ephemeral=True)
         if not SERPAPI_KEY:
-            return await interaction.response.send_message('SERPAPI_API_KEY is missing from the server environment.', ephemeral=True)
+            return await interaction.response.send_message('SERPAPI_API_KEY is missing from FadeHost.', ephemeral=True)
         await interaction.response.defer(thinking=True, ephemeral=True)
         params = dict(engine='google_hotels', q=f'hotels in {city.strip()}', check_in_date=checkin,
                       check_out_date=checkout, adults=adults, children=0, currency='GBP', gl='uk',
                       hl='en', sort_by='3', api_key=SERPAPI_KEY, output='json')
-        # Intentionally omit max_price to catch changes across the budget threshold.
+        # Do not impose max_price at the API: crossing the budget threshold should be recorded.
         try:
             timeout = aiohttp.ClientTimeout(total=70)
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(SERPAPI_URL, params=params) as resp:
                     data = await resp.json(content_type=None)
-                    if resp.status != 200 or data.get('error'):
-                        raise RuntimeError(f'SerpApi returned HTTP {resp.status}; check your key, quota, or query in the SerpApi dashboard.')
+                    if resp.status != 200 or not isinstance(data, dict) or data.get('error'):
+                        raise RuntimeError(f'SerpApi HTTP {resp.status}; check key, quota or query.')
             props = data.get('properties') or []
-            if not isinstance(props,list): raise RuntimeError('Unexpected API response: missing properties list.')
-            parsed = [_row(p) for p in props if isinstance(p,dict)]
+            if not isinstance(props, list):
+                raise RuntimeError('Unexpected API result: properties list missing.')
+            parsed = [_row(p) for p in props if isinstance(p, dict)]
             if nights == 1:
-                for row in parsed:
-                    if row['total_price'] is None:
-                        row['total_price'] = row['nightly_price']
+                for item in parsed:
+                    if item['total_price'] is None:
+                        item['total_price'] = item['nightly_price']
             parsed = [r for r in parsed if r['total_price'] is not None]
             if not parsed:
-                return await interaction.followup.send('No priced results returned; nothing was saved. Try another location.', ephemeral=True)
-            _, previous = await asyncio.to_thread(_snapshot, city.strip(),checkin,checkout,adults,'GBP',budget,parsed)
-            in_budget = [x for x in parsed if x['total_price'] <= budget]
-            in_budget.sort(key=lambda r:r['total_price'])
-            link=_google_link(city,checkin,checkout,adults)
-            lines=[f'🏨 **{city}** · {checkin} → {checkout} ({nights} night(s), {adults} adult(s))',
-                   f'**Google Hotels quotes:** {len(parsed)} priced properties checked · **{len(in_budget)} ≤ {_money(budget)}**',
-                   f'Compared against: {"previous check" if previous else "none — first check"}',
-                   '⚠️ Lowest property quotes **do not prove a private room**. Confirm room type, final tax and cancellation before paying.', '']
-            for item in in_budget[:12]:
-                name=discord.utils.escape_markdown(item['hotel_name'])[:55]
-                lines.append(f'• **{name}** — {_money(item["total_price"])} · {_comparison(item,previous.get(item["property_key"]))}')
-            if not in_budget: lines.append('No quoted properties within budget in this page of results.')
-            lines.extend(['', f'🔗 [Open Google Hotels to check room offers]({link})',
-                          'ℹ️ On-demand only. Prices stored for this exact city, dates, guests and currency. The search covers one results page; not all hotels.'])
-            msg='\n'.join(lines)
-            await interaction.followup.send(msg[:1950], ephemeral=True, suppress_embeds=True)
-        except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError, OSError) as e:
-            await interaction.followup.send(f'⚠️ Hotel search failed: {str(e)[:300]}',ephemeral=True)
+                return await interaction.followup.send('No priced results returned; nothing saved. Try another location.', ephemeral=True)
+            previous, older, searched = await asyncio.to_thread(
+                _snapshot, city.strip(), checkin, checkout, adults, 'GBP', budget, parsed)
+            embeds = _search_embeds(city.strip(), checkin, checkout, nights, adults,
+                                   budget, parsed, previous, older, searched)
+            for batch in _group_embeds_for_discord(embeds):
+                await interaction.followup.send(embeds=batch, ephemeral=True,
+                                                allowed_mentions=discord.AllowedMentions.none())
+        except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError, OSError, discord.HTTPException) as e:
+            await interaction.followup.send(f'⚠️ Hotel search failed: {str(e)[:300]}', ephemeral=True)
 
-    @tree.command(name='hotelhistory', description='View the last checks saved for a hotel trip', guild=discord.Object(id=GUILD_ID))
-    @app_commands.describe(city='Same city as the search',checkin='YYYY-MM-DD',checkout='YYYY-MM-DD',adults='Guest count used for search')
-    async def hotelhistory(interaction: discord.Interaction, city: str, checkin: str, checkout: str, adults: int=1):
-        if OWNER_ID and str(interaction.user.id) != OWNER_ID:
+    @tree.command(name='hoteldetails', description='Read the latest saved hotel details; uses zero API credits', guild=guild)
+    @app_commands.describe(hotel='Hotel name (from your previous /hotels results)')
+    async def hoteldetails(interaction: discord.Interaction, hotel: str):
+        if str(interaction.user.id) != OWNER_ID:
             return await interaction.response.send_message('This is a private command.', ephemeral=True)
-        try: _night_count(checkin,checkout)
-        except ValueError as e: return await interaction.response.send_message(str(e),ephemeral=True)
+        result, error = await asyncio.to_thread(_look_up_hotel, hotel)
+        if error:
+            return await interaction.response.send_message('⚠️ ' + _safe(error, 650), ephemeral=True)
+        row, older, previous = result
+        await interaction.response.send_message(embed=_detail_embed(row, older, previous), ephemeral=True,
+                                                allowed_mentions=discord.AllowedMentions.none())
+
+    @hoteldetails.autocomplete('hotel')
+    async def hotel_autocomplete(interaction: discord.Interaction, current: str):
+        if str(interaction.user.id) != OWNER_ID:
+            return []
         with _db_connect() as c:
-            checks=c.execute('''SELECT id,searched_at,property_count FROM hotel_checks WHERE destination=? AND checkin=? AND checkout=? AND adults=? AND currency='GBP' ORDER BY id DESC LIMIT 8''',(_normalized(city),checkin,checkout,adults)).fetchall()
-        if not checks: return await interaction.response.send_message('No saved checks for this exact trip yet.',ephemeral=True)
-        lines=[f'📈 **Hotel search history: {city}, {checkin} to {checkout}**']
-        for chk in checks:
-            stamp=chk['searched_at'][:16].replace('T',' ')+' UTC'
-            lines.append(f'• {stamp} — {chk["property_count"]} quoted properties')
-        lines.append('Run `/hotels` again to compare current quotes with the previous snapshot.')
-        await interaction.response.send_message('\n'.join(lines),ephemeral=True)
+            rows = c.execute('''SELECT hotel_name FROM hotel_prices ORDER BY id DESC LIMIT 800''').fetchall()
+        hotels = list(dict.fromkeys(r['hotel_name'] for r in rows))
+        matches = [h for h in hotels if _normalized(current) in _normalized(h)]
+        return [app_commands.Choice(name=h[:100], value=h[:100]) for h in matches[:25]]
+
+    @tree.command(name='hotelhistory', description='List saved checks for a trip without API usage', guild=guild)
+    @app_commands.describe(city='Same city as the search', checkin='YYYY-MM-DD',
+                           checkout='YYYY-MM-DD', adults='Guest count used for the search')
+    async def hotelhistory(interaction: discord.Interaction, city: str, checkin: str,
+                           checkout: str, adults: int = 1):
+        if str(interaction.user.id) != OWNER_ID:
+            return await interaction.response.send_message('This is a private command.', ephemeral=True)
+        try:
+            _night_count(checkin, checkout)
+        except ValueError as e:
+            return await interaction.response.send_message(str(e), ephemeral=True)
+        with _db_connect() as c:
+            checks = c.execute('''SELECT id, searched_at, property_count FROM hotel_checks
+                WHERE destination=? AND checkin=? AND checkout=? AND adults=? AND currency='GBP'
+                ORDER BY id DESC LIMIT 10''', (_normalized(city), checkin, checkout, adults)).fetchall()
+        if not checks:
+            return await interaction.response.send_message('No saved checks for this trip yet.', ephemeral=True)
+        lines = [f'📈 **Hotel price-check history: {_safe(city)} · {checkin} → {checkout}**']
+        lines.extend(f'• {_stamp(r["searched_at"])} — {r["property_count"]} priced properties'
+                     for r in checks)
+        lines.append('Use `/hotels` to compare prices; `/hoteldetails` to inspect saved hotel information.')
+        await interaction.response.send_message('\n'.join(lines), ephemeral=True)
