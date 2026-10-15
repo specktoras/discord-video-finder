@@ -2154,4 +2154,8 @@ async def rayediag(interaction: discord.Interaction):
     await interaction.followup.send("\n".join(summary)[:1900], file=attachment,
                                     ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
+# Register hotel searches for this existing private guild before starting the bot.
+from hotel_checker import register_hotel_commands
+register_hotel_commands(tree)
+
 bot.run(TOKEN)
