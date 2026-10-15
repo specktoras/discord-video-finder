@@ -1,10 +1,12 @@
 """Private, on-demand Google Hotels results and SQLite price history for discord.py.
 
+V2.3: add opt-in room/provider offer inspection (one API credit per hotel).
 V2.2: combine known Italian city aliases for hotel price history. Historical
 search labels, timestamps and prices are preserved; no new scheduled work.
 
 Integration: register_hotel_commands(tree) once before tree.sync().
 No timers or background hotel-price polling. /hotels uses ONE SerpApi request.
+/hoteloffers uses ONE extra request for ONE property, and saves room-offer history.
 /hoteldetails and /hotelhistory are offline database reads (ZERO SerpApi credits).
 """
 from __future__ import annotations
@@ -94,6 +96,38 @@ def _db_connect():
                         [(_destination_key(r['destination']), r['id']) for r in missing])
     con.execute('''CREATE INDEX IF NOT EXISTS idx_checks_trip_key ON hotel_checks
         (destination_key, checkin, checkout, adults, currency, searched_at, id)''')
+    # Additive only. Never rewrite hotel_checks or hotel_prices.
+    con.executescript('''
+        CREATE TABLE IF NOT EXISTS hotel_offer_checks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            searched_at TEXT NOT NULL,
+            property_key TEXT NOT NULL,
+            hotel_name TEXT NOT NULL,
+            destination_key TEXT NOT NULL,
+            checkin TEXT NOT NULL,
+            checkout TEXT NOT NULL,
+            adults INTEGER NOT NULL,
+            currency TEXT NOT NULL,
+            room_count INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS hotel_room_offers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            offer_check_id INTEGER NOT NULL REFERENCES hotel_offer_checks(id),
+            offer_key TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            room_name TEXT NOT NULL,
+            total_price REAL NOT NULL,
+            room_class TEXT NOT NULL,
+            bathroom TEXT NOT NULL,
+            free_cancellation INTEGER,
+            breakfast_included INTEGER,
+            booking_url TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_hotel_offer_trip
+            ON hotel_offer_checks (destination_key, checkin, checkout, adults, currency, hotel_name, searched_at);
+        CREATE INDEX IF NOT EXISTS idx_hotel_room_offer_check
+            ON hotel_room_offers (offer_check_id, offer_key);
+    ''')
     con.commit()
     return con
 
@@ -534,6 +568,176 @@ def _status_embed(status):
     return e
 
 
+# --- Optional provider / room inspection. One API call per /hoteloffers invocation. ---
+
+
+def _room_class(room_name):
+    """Conservative keyword hint. Never assert checkout-confirmed exclusivity."""
+    name = _normalized(room_name)
+    if not name:
+        return 'unknown'
+    if re.search(r'\b(dorm(?:itory)?|hostel bed|bed in|bunk in|shared (?:room|bedroom|dorm)|capsule|sleeping pod)\b', name):
+        return 'dormitory_or_shared'
+    if re.search(r'\b(private (?:room|bedroom)|single room|double room|twin room|triple room|quadruple room|family room|studio|apartment|entire (?:place|unit|home|property)|suite|king room|queen room|standard room|deluxe room|superior room|classic room|economy room|guest room)\b', name):
+        return 'likely_private'
+    return 'unknown'
+
+
+def _bathroom_class(room_name, inclusions):
+    content = _normalized(str(room_name) + ' ' + ' '.join(str(v) for v in inclusions))
+    if re.search(r'\b(shared|communal) (?:bathroom|toilet|bath|shower)\b', content):
+        return 'shared'
+    if re.search(r'\b(private|ensuite|en suite|own) (?:bathroom|toilet|bath|shower)\b', content):
+        return 'private_described'
+    return 'not_specified'
+
+
+def _flag(v):
+    if v is True:
+        return 1
+    if v is False:
+        return 0
+    return None
+
+
+def _offer_rows(response):
+    """Only provider-specific, NAMED room offers. No property-level assumed price."""
+    found = {}
+    for section in ('featured_prices', 'prices'):
+        providers = response.get(section) or []
+        if not isinstance(providers, list):
+            continue
+        for p in providers[:60]:
+            if not isinstance(p, dict):
+                continue
+            source = str(p.get('source') or 'Unknown provider')[:100]
+            rooms = p.get('rooms') or []
+            if not isinstance(rooms, list):
+                continue
+            for room in rooms[:80]:
+                if not isinstance(room, dict) or not isinstance(room.get('name'), str):
+                    continue
+                name = room['name'].strip()[:160]
+                if not name:
+                    continue
+                sub_rates = room.get('rates')
+                if not isinstance(sub_rates, list) or not sub_rates:
+                    sub_rates = [room]
+                for rate in sub_rates[:25]:
+                    if not isinstance(rate, dict):
+                        continue
+                    total = _price(rate.get('total_rate'))
+                    # Only one-night fallback; provided by caller below.
+                    if total is None:
+                        total = _price(room.get('total_rate'))
+                    if total is None:
+                        continue
+                    inc = rate.get('inclusions') or []
+                    if not isinstance(inc, list):
+                        inc = []
+                    cls = _room_class(name)
+                    bathroom = _bathroom_class(name, inc)
+                    cancel = _flag(rate.get('free_cancellation'))
+                    breakfast = _flag(rate.get('breakfast_included'))
+                    key = '|'.join([_normalized(source), _normalized(name),
+                                    str(cancel), str(breakfast), bathroom])
+                    item = dict(offer_key=key, provider=source, room_name=name,
+                                total_price=total, room_class=cls, bathroom=bathroom,
+                                free_cancellation=cancel, breakfast_included=breakfast,
+                                booking_url=_url_or_empty(rate.get('link') or room.get('link') or p.get('link')))
+                    if key not in found or total < found[key]['total_price']:
+                        found[key] = item
+    return sorted(found.values(), key=lambda v: v['total_price'])
+
+
+def _save_room_offers(hotel, rows):
+    """Track dated offers separately; preserves all old property quotes."""
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    with _db_connect() as c:
+        where = (hotel['destination_key'], hotel['checkin'], hotel['checkout'],
+                 hotel['adults'], hotel['currency'], _normalized(hotel['hotel_name']))
+        # Match hotel by normalised name in Python, because SQLite LOWER is ASCII only.
+        potential = c.execute("""SELECT * FROM hotel_offer_checks WHERE destination_key=?
+            AND checkin=? AND checkout=? AND adults=? AND currency=?
+            ORDER BY searched_at DESC, id DESC LIMIT 200""", where[:5]).fetchall()
+        previous = next((dict(p) for p in potential
+                         if _normalized(p['hotel_name']) == where[5]), None)
+        prevrows = {}
+        if previous:
+            for x in c.execute('SELECT * FROM hotel_room_offers WHERE offer_check_id=?', (previous['id'],)):
+                prevrows[x['offer_key']] = dict(x)
+        cur = c.execute("""INSERT INTO hotel_offer_checks
+             (searched_at,property_key,hotel_name,destination_key,checkin,checkout,adults,currency,room_count)
+             VALUES (?,?,?,?,?,?,?,?,?)""",
+             (now, hotel['property_key'], hotel['hotel_name'], *where[:5], len(rows)))
+        for r in rows:
+            c.execute("""INSERT INTO hotel_room_offers
+             (offer_check_id,offer_key,provider,room_name,total_price,room_class,bathroom,
+              free_cancellation,breakfast_included,booking_url)
+             VALUES (?,?,?,?,?,?,?,?,?,?)""",
+             (cur.lastrowid, *(r[k] for k in ('offer_key','provider','room_name','total_price',
+                 'room_class','bathroom','free_cancellation','breakfast_included','booking_url'))))
+    return now, previous, prevrows
+
+
+def _offer_history(hotel):
+    with _db_connect() as c:
+        rows = c.execute("""SELECT * FROM hotel_offer_checks
+            WHERE destination_key=? AND checkin=? AND checkout=? AND adults=? AND currency=?
+            ORDER BY searched_at DESC,id DESC LIMIT 150""",
+            (hotel['destination_key'],hotel['checkin'],hotel['checkout'],hotel['adults'],hotel['currency'])).fetchall()
+        rows = [dict(r) for r in rows if _normalized(r['hotel_name']) == _normalized(hotel['hotel_name'])]
+        return rows[:12]
+
+
+def _offer_embeds(hotel, offers, checked, previous, old_offers, budget):
+    likely = [r for r in offers if r['room_class'] == 'likely_private']
+    unclear = [r for r in offers if r['room_class'] == 'unknown']
+    dorms = [r for r in offers if r['room_class'] == 'dormitory_or_shared']
+    likely_in_budget = sorted((r for r in likely if r['total_price'] <= budget),key=lambda r:r['total_price'])
+    unclear_in_budget = sorted((r for r in unclear if r['total_price'] <= budget),key=lambda r:r['total_price'])
+    shown = likely_in_budget[:12] + unclear_in_budget[:5]
+    header = discord.Embed(title='🛏️ Room offers · ' + hotel['hotel_name'][:140],
+        description=(f'**{hotel["checkin"]} → {hotel["checkout"]} · {hotel["adults"]} adult(s)**\n'
+                     f'**Budget:** {_money(budget)} for the full stay · GBP\n'
+                     f'**Checked:** {_stamp(checked)}\n'
+                     f'**Compared with:** {_stamp(previous["searched_at"]) if previous else "No previous room-offer check"}\n\n'
+                     f'✅ **{len(likely_in_budget)} likely-private offers ≤ budget** · '
+                     f'❔ {len(unclear_in_budget)} unclear offers · '
+                     f'🚫 {len(dorms)} dorm/shared offers excluded\n\n'
+                     '**Likely private ≠ guaranteed.** Room names are clues, not proof of exclusivity; '
+                     'confirm your own bedroom, bathroom, final total and guest count on the booking page.'))
+    if not offers:
+        header.add_field(name='No room-level rates supplied', value='Google returned no priced, named room offers for this hotel. Its headline price is still unverified.', inline=False)
+    elif not shown:
+        header.add_field(name='Nothing suitable within budget', value='Google returned room offers, but none have a likely-private or unclear room category within this budget.', inline=False)
+    embeds=[header]
+    for pos in range(0,len(shown),5):
+        chunk=shown[pos:pos+5]
+        embed=discord.Embed(title=f'🏨 Room offers {pos+1}–{pos+len(chunk)} of {len(shown)} shown')
+        for r in chunk:
+            old=old_offers.get(r['offer_key'])
+            change = ('🆕 new offer' if old is None else
+                      '＝ same' if abs(r['total_price']-old['total_price']) < .01 else
+                      f'📉 ↓ {_money(old["total_price"]-r["total_price"])}' if r['total_price']<old['total_price'] else
+                      f'📈 ↑ {_money(r["total_price"]-old["total_price"])}')
+            cat = '🛏️ likely private' if r['room_class']=='likely_private' else '❔ room type unclear'
+            bath = {'private_described':'private bathroom described','shared':'shared bathroom',
+                    'not_specified':'bathroom not specified'}[r['bathroom']]
+            bits=[f'{cat} · {bath}',f'💷 {change}']
+            if r['breakfast_included'] is not None:
+                bits.append('🍳 breakfast included' if r['breakfast_included'] else '🍳 breakfast not included')
+            if r['free_cancellation'] is not None:
+                bits.append('✅ free cancellation' if r['free_cancellation'] else '⚠️ no free cancellation listed')
+            if r['booking_url']:
+                bits.append(f'🔗 [Open provider offer]({r["booking_url"]})')
+            embed.add_field(name=f'{_safe(r["provider"],45)} · {_money(r["total_price"])} · {_safe(r["room_name"],90)}',
+                value='\n'.join(bits)[:1024],inline=False)
+        embed.set_footer(text='One API request for the whole hotel, not per room. Only on command.')
+        embeds.append(embed)
+    return embeds
+
+
 def register_hotel_commands(tree: app_commands.CommandTree):
     """Register once, before the existing bot calls tree.sync()."""
     guild = discord.Object(id=GUILD_ID)
@@ -640,3 +844,79 @@ def register_hotel_commands(tree: app_commands.CommandTree):
                      f' (searched: {_safe(r["destination"], 40)})' for r in checks)
         lines.append('Use `/hotels` to compare prices; `/hoteldetails` to inspect saved hotel information.')
         await interaction.response.send_message('\n'.join(lines), ephemeral=True)
+
+
+    @tree.command(name='hoteloffers', description='Check actual room types and provider quotes for ONE saved hotel (1 API credit)', guild=guild)
+    @app_commands.describe(hotel='Hotel from your saved searches', budget='Total stay budget in GBP')
+    async def hoteloffers(interaction: discord.Interaction, hotel: str, budget: float = 120.0):
+        if str(interaction.user.id) != OWNER_ID:
+            return await interaction.response.send_message('This is a private command.', ephemeral=True)
+        if not 0 < budget <= 10000:
+            return await interaction.response.send_message('Enter a budget between £1 and £10,000.', ephemeral=True)
+        result, error = await asyncio.to_thread(_look_up_hotel, hotel)
+        if error:
+            return await interaction.response.send_message('⚠️ ' + _safe(error, 500), ephemeral=True)
+        selected, _, _ = result
+        token = selected.get('property_token')
+        if not token:
+            return await interaction.response.send_message('No property token saved for this hotel. Search /hotels for this destination again first.', ephemeral=True)
+        if not SERPAPI_KEY:
+            return await interaction.response.send_message('SERPAPI_API_KEY is missing.', ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        params = dict(engine='google_hotels', q=f'hotels in {selected["destination"]}',
+                      check_in_date=selected['checkin'], check_out_date=selected['checkout'],
+                      adults=selected['adults'], children=0, currency=selected['currency'],
+                      gl='uk', hl='en', property_token=token, api_key=SERPAPI_KEY, output='json')
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=75)) as session:
+                async with session.get(SERPAPI_URL, params=params) as resp:
+                    data = await resp.json(content_type=None)
+                    if resp.status != 200 or not isinstance(data, dict) or data.get('error'):
+                        raise RuntimeError(f'SerpApi HTTP {resp.status}; check key, quota, or request.')
+            if data.get('property_token') and data['property_token'] != token:
+                raise RuntimeError('Google returned a different property; no room prices were saved.')
+            if data.get('name') and _normalized(data['name']) != _normalized(selected['hotel_name']):
+                raise RuntimeError('Returned hotel name differs from your saved selection. Nothing saved.')
+            offers = _offer_rows(data)
+            # No inferred per-night prices: only total_rate offers are compared and saved.
+            checked, previous, prevrows = await asyncio.to_thread(_save_room_offers, selected, offers)
+            embeds = _offer_embeds(selected, offers, checked, previous, prevrows, budget)
+            for group in _group_embeds_for_discord(embeds):
+                await interaction.followup.send(embeds=group,ephemeral=True,
+                                                allowed_mentions=discord.AllowedMentions.none())
+        except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError, OSError, discord.HTTPException, sqlite3.Error) as exc:
+            await interaction.followup.send('⚠️ Room-offer search failed: ' + _safe(str(exc), 300), ephemeral=True)
+
+    @hoteloffers.autocomplete('hotel')
+    async def offer_autocomplete(interaction: discord.Interaction, current: str):
+        if str(interaction.user.id) != OWNER_ID:
+            return []
+        with _db_connect() as c:
+            rows = c.execute('SELECT hotel_name FROM hotel_prices ORDER BY id DESC LIMIT 800').fetchall()
+        hotels = list(dict.fromkeys(r['hotel_name'] for r in rows))
+        matches = [h for h in hotels if _normalized(current) in _normalized(h)]
+        return [app_commands.Choice(name=h[:100], value=h[:100]) for h in matches[:25]]
+
+    @tree.command(name='hotelofferhistory', description='Show saved detailed room-rate checks (zero API credits)', guild=guild)
+    @app_commands.describe(hotel='Hotel from your saved searches')
+    async def hotelofferhistory(interaction: discord.Interaction, hotel: str):
+        if str(interaction.user.id) != OWNER_ID:
+            return await interaction.response.send_message('This is a private command.', ephemeral=True)
+        result, error = await asyncio.to_thread(_look_up_hotel, hotel)
+        if error:
+            return await interaction.response.send_message('⚠️ ' + _safe(error, 500), ephemeral=True)
+        selected, _, _ = result
+        records=await asyncio.to_thread(_offer_history, selected)
+        if not records:
+            message='No saved detailed room checks for this hotel yet. Run `/hoteloffers` once.'
+        else:
+            lines=[f'🛏️ **Saved room-offer checks · {_safe(selected["hotel_name"],90)}**']
+            for row in records:
+                lines.append(f'• {_stamp(row["searched_at"])} — {row["room_count"]} named rates')
+            lines.append('This is saved data and uses zero SerpApi credits.')
+            message='\n'.join(lines)
+        await interaction.response.send_message(message[:1900], ephemeral=True)
+
+    @hotelofferhistory.autocomplete('hotel')
+    async def offerhist_autocomplete(interaction: discord.Interaction, current: str):
+        return await offer_autocomplete(interaction, current)
