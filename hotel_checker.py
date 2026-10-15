@@ -1,5 +1,7 @@
 """Private, on-demand Google Hotels results and SQLite price history for discord.py.
 
+V2.5: zero-credit saved-room-offers browser with over-budget rates, excluded dorms,
+provider links, and comparisons to an earlier saved detailed check.
 V2.4: multilingual dormitory detection and a zero-credit correction of saved
 unknown room-class labels (prices and historical snapshots preserved).
 V2.3: add opt-in room/provider offer inspection (one API credit per hotel).
@@ -9,7 +11,8 @@ search labels, timestamps and prices are preserved; no new scheduled work.
 Integration: register_hotel_commands(tree) once before tree.sync().
 No timers or background hotel-price polling. /hotels uses ONE SerpApi request.
 /hoteloffers uses ONE extra request for ONE property, and saves room-offer history.
-/hoteldetails and /hotelhistory are offline database reads (ZERO SerpApi credits).
+/hoteldetails, /hotelhistory, /hotelsavedoffers and /hotelofferhistory
+read SQLite only (ZERO SerpApi credits).
 """
 from __future__ import annotations
 
@@ -778,6 +781,115 @@ def _offer_history(hotel):
         return rows
 
 
+
+def _saved_offer_snapshot(hotel, snapshot=1):
+    # Read latest/specific saved detailed check and preceding comparison, no network.
+    if not isinstance(snapshot, int) or not 1 <= snapshot <= 30:
+        raise ValueError('Snapshot must be between 1 (newest) and 30.')
+    with _db_connect() as c:
+        rows = c.execute('''SELECT * FROM hotel_offer_checks
+            WHERE destination_key=? AND checkin=? AND checkout=? AND adults=? AND currency=?
+            ORDER BY searched_at DESC, id DESC LIMIT 1000''',
+            (hotel['destination_key'], hotel['checkin'], hotel['checkout'],
+             hotel['adults'], hotel['currency'])).fetchall()
+        matching = [dict(r) for r in rows if _normalized(r['hotel_name']) == _normalized(hotel['hotel_name'])]
+        if len(matching) < snapshot:
+            return None
+        check = matching[snapshot - 1]
+        prev = matching[snapshot] if len(matching) > snapshot else None
+        offers = [dict(r) for r in c.execute('''SELECT * FROM hotel_room_offers
+            WHERE offer_check_id=? ORDER BY id''', (check['id'],)).fetchall()]
+        older = {}
+        if prev:
+            older = {r['offer_key']: dict(r) for r in c.execute('''SELECT * FROM hotel_room_offers
+                WHERE offer_check_id=?''', (prev['id'],)).fetchall()}
+    return {'check': check, 'previous': prev, 'offers': offers, 'older': older,
+            'available_snapshots': len(matching)}
+
+
+def _saved_offer_embeds(hotel, saved, budget=120.0, page=1, per_page=18, snapshot=1):
+    # Render stored rates across categories, with bounded pages for mobile Discord.
+    categories = {'likely_private': (0, '🛏️ Likely private'),
+                  'unknown': (1, '❔ Unclear room type'),
+                  'dormitory_or_shared': (2, '🚫 Dormitory/shared sleeping')}
+    offers = sorted(saved['offers'], key=lambda r: (
+        categories.get(r['room_class'], (1, '❔ Unclear room type'))[0],
+        r['total_price'], _normalized(r['provider']), _normalized(r['room_name'])))
+    total = len(offers)
+    last_page = max(1, (total + per_page - 1) // per_page)
+    if not isinstance(page, int) or not 1 <= page <= last_page:
+        raise ValueError(f'Page must be between 1 and {last_page}.')
+    pos = (page - 1) * per_page
+    selected = offers[pos:pos + per_page]
+    count_private = sum(r['room_class'] == 'likely_private' for r in offers)
+    count_unknown = sum(r['room_class'] == 'unknown' for r in offers)
+    count_shared = sum(r['room_class'] == 'dormitory_or_shared' for r in offers)
+    within_private = sum(r['room_class'] == 'likely_private' and r['total_price'] <= budget for r in offers)
+    header = discord.Embed(
+        title='🗂️ Saved room offers · ' + str(hotel['hotel_name'])[:145],
+        description=(
+            f'**{saved["check"]["checkin"]} → {saved["check"]["checkout"]}** · '
+            f'**{saved["check"]["adults"]} adult(s)** · {saved["check"]["currency"]}\n'
+            f'**Saved:** {_stamp(saved["check"]["searched_at"])} '
+            f'· **Snapshot:** #{snapshot} of {saved["available_snapshots"]}\n'
+            f'**Compared with:** {_stamp(saved["previous"]["searched_at"]) if saved["previous"] else "No earlier detailed check"}\n'
+            f'**Budget:** {_money(budget)} · **{within_private} likely-private offers under budget**\n'
+            f'**All {total} saved offers:** 🛏️ {count_private} likely private · '
+            f'❔ {count_unknown} unclear · 🚫 {count_shared} shared/dorm\n'
+            f'**Showing {pos + 1 if total else 0}–{min(pos + per_page, total)} of {total} · page {page}/{last_page}**\n\n'
+            '⚠️ Google quotes may be outdated or unavailable at checkout. '
+            'Likely private is **not guaranteed**; inspect the sleeping arrangements and final total.'
+        ),
+    )
+    if not offers:
+        header.add_field(name='No named room rates saved', value='Run `/hoteloffers` to request a detailed room-price check (1 credit).', inline=False)
+    result = [header]
+    for category in ('likely_private', 'unknown', 'dormitory_or_shared'):
+        group = [r for r in selected if r['room_class'] == category]
+        if not group:
+            continue
+        label = categories[category][1]
+        for start in range(0, len(group), 5):
+            chunk = group[start:start + 5]
+            embed = discord.Embed(title=f'{label} · {len(group)} on this page')
+            for r in chunk:
+                previous = saved['older'].get(r['offer_key'])
+                if previous is None:
+                    change = '🆕 Not in previous snapshot' if saved['previous'] else 'First recorded offer'
+                else:
+                    delta = round(r['total_price'] - previous['total_price'], 2)
+                    marker = ('＝ unchanged' if abs(delta) < 0.01 else
+                              f'📉 ↓ {_money(-delta)}' if delta < 0 else
+                              f'📈 ↑ {_money(delta)}')
+                    change = f'{marker} · was {_money(previous["total_price"])}'
+                price = r['total_price']
+                budget_line = (f'✅ Within {_money(budget)} budget' if price <= budget else
+                               f'⚠️ {_money(price - budget)} above {_money(budget)} budget')
+                bath = {'private_described': 'private bathroom described',
+                        'shared': 'shared bathroom',
+                        'not_specified': 'bathroom unspecified'}.get(r['bathroom'], 'bathroom unspecified')
+                options = [f'**Room:** {_safe(r["room_name"], 140)}',
+                           f'{budget_line} · 🚿 {bath}',
+                           f'📊 {change}']
+                if r['free_cancellation'] is not None:
+                    options.append('✅ Free cancellation stated' if r['free_cancellation'] else '⚠️ Free cancellation not stated')
+                if r['breakfast_included'] is not None:
+                    options.append('🍳 Breakfast included' if r['breakfast_included'] else '🍳 Breakfast not included')
+                offer_url = _url_or_empty(r.get('booking_url'))
+                if offer_url and len(offer_url) <= 450:
+                    options.append(f'🔗 [Open provider offer]({offer_url})')
+                elif offer_url:
+                    options.append('🔗 Provider link too long to display safely')
+                else:
+                    options.append('🔗 No provider link saved')
+                embed.add_field(name=f'{_safe(r["provider"], 70)} — {_money(price)}',
+                                value='\n'.join(options)[:1024], inline=False)
+            embed.set_footer(text='Stored provider quote, not verified checkout availability. No SerpApi request.')
+            result.append(embed)
+    header.set_footer(text='Zero SerpApi credits. Use /hotelsavedoffers page:2 for more saved offers if available.')
+    return result
+
+
 def _offer_embeds(hotel, offers, checked, previous, old_offers, budget):
     likely = [r for r in offers if r['room_class'] == 'likely_private']
     unclear = [r for r in offers if r['room_class'] == 'unknown']
@@ -1015,4 +1127,45 @@ def register_hotel_commands(tree: app_commands.CommandTree):
 
     @hotelofferhistory.autocomplete('hotel')
     async def offerhist_autocomplete(interaction: discord.Interaction, current: str):
+        return await offer_autocomplete(interaction, current)
+
+
+    @tree.command(name='hotelsavedoffers', description='View ALL saved hotel room quotes, including over-budget and dorms (0 API credits)', guild=guild)
+    @app_commands.describe(hotel='Hotel from your saved searches', budget='Budget for highlighting offers (GBP)',
+                           snapshot='1 = newest detailed check, 2 = previous, etc.',
+                           page='Page of saved offers (up to 18 on each page)')
+    async def hotelsavedoffers(interaction: discord.Interaction, hotel: str, budget: float = 120.0,
+                              snapshot: int = 1, page: int = 1):
+        if str(interaction.user.id) != OWNER_ID:
+            return await interaction.response.send_message('This is a private command.', ephemeral=True)
+        if not 0 < budget <= 10000:
+            return await interaction.response.send_message('Enter a budget between £1 and £10,000.', ephemeral=True)
+        if not 1 <= snapshot <= 30 or page < 1:
+            return await interaction.response.send_message('Snapshot must be 1–30; page must be 1 or higher.', ephemeral=True)
+        try:
+            result, error = await asyncio.to_thread(_look_up_hotel, hotel)
+            if error:
+                return await interaction.response.send_message('⚠️ ' + _safe(error, 500), ephemeral=True)
+            selected, _, _ = result
+            saved = await asyncio.to_thread(_saved_offer_snapshot, selected, snapshot)
+            if saved is None:
+                return await interaction.response.send_message(
+                    f'No saved detailed room offers for snapshot #{snapshot}. Run `/hoteloffers` to save a detailed search first.', ephemeral=True)
+            embeds = _saved_offer_embeds(selected, saved, budget, page, snapshot=snapshot)
+            # Multiple ephemeral messages, avoiding Discord's combined 6000-character limit.
+            batches = _group_embeds_for_discord(embeds)
+            await interaction.response.send_message(embeds=batches[0], ephemeral=True,
+                                                    allowed_mentions=discord.AllowedMentions.none())
+            for batch in batches[1:]:
+                await interaction.followup.send(embeds=batch, ephemeral=True,
+                                                allowed_mentions=discord.AllowedMentions.none())
+        except (sqlite3.Error, OSError, ValueError, discord.HTTPException) as exc:
+            message = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
+            if interaction.response.is_done():
+                await interaction.followup.send('⚠️ Saved-offer lookup failed: ' + _safe(message, 250), ephemeral=True)
+            else:
+                await interaction.response.send_message('⚠️ Saved-offer lookup failed: ' + _safe(message, 250), ephemeral=True)
+
+    @hotelsavedoffers.autocomplete('hotel')
+    async def savedoffer_autocomplete(interaction: discord.Interaction, current: str):
         return await offer_autocomplete(interaction, current)
